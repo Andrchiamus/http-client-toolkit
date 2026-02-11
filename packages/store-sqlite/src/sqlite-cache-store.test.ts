@@ -230,6 +230,11 @@ describe('SQLiteCacheStore', () => {
         cleanupIntervalMs: 0,
       });
 
+      expect(
+        (noCleanupStore as unknown as { cleanupInterval?: NodeJS.Timeout })
+          .cleanupInterval,
+      ).toBeUndefined();
+
       // Should work without automatic cleanup
       await noCleanupStore.set('key1', 'value1', 60);
       const value = await noCleanupStore.get('key1');

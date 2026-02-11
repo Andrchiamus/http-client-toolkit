@@ -329,7 +329,7 @@ When a file path is passed instead, the store manages its own connection and wil
 ```typescript
 new SQLiteCacheStore({
   database: './cache.db', // Default: ':memory:'
-  cleanupIntervalMs: 60_000,
+  cleanupIntervalMs: 60_000, // Set to 0 to disable automatic cleanup
   maxEntrySizeBytes: 5_242_880, // Default: 5 MiB
 });
 ```

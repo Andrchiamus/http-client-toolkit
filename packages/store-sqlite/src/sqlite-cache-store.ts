@@ -248,6 +248,10 @@ export class SQLiteCacheStore<T = unknown> implements CacheStore<T> {
   }
 
   private startCleanupInterval(): void {
+    if (this.cleanupIntervalMs <= 0) {
+      return;
+    }
+
     this.cleanupInterval = setInterval(async () => {
       await this.cleanup();
     }, this.cleanupIntervalMs);
