@@ -3,6 +3,7 @@ import { HttpClient } from './http-client.js';
 import { HttpClientError } from '../errors/http-client-error.js';
 
 const baseUrl = 'https://api.example.com';
+const alternateBaseUrl = 'https://api-alt.example.com';
 
 describe('HttpClient', () => {
   let httpClient: HttpClient;
@@ -240,5 +241,37 @@ describe('HttpClient', () => {
     expect(calls.canProceed).toBe(1);
     expect(calls.getWaitTime).toBe(1);
     expect(calls.record).toBe(1);
+  });
+
+  test('should generate distinct cache keys for different URL origins', async () => {
+    const observedHashes: Array<string> = [];
+
+    nock(baseUrl)
+      .get('/same-path')
+      .query({ q: '1' })
+      .reply(200, { source: 'a' });
+    nock(alternateBaseUrl)
+      .get('/same-path')
+      .query({ q: '1' })
+      .reply(200, { source: 'b' });
+
+    const cacheStoreStub = {
+      async get() {
+        return undefined;
+      },
+      async set(hash: string) {
+        observedHashes.push(hash);
+      },
+      async delete() {},
+      async clear() {},
+    } as const;
+
+    const client = new HttpClient({ cache: cacheStoreStub });
+
+    await client.get(`${baseUrl}/same-path?q=1`);
+    await client.get(`${alternateBaseUrl}/same-path?q=1`);
+
+    expect(observedHashes).toHaveLength(2);
+    expect(observedHashes[0]).not.toBe(observedHashes[1]);
   });
 });

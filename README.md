@@ -201,7 +201,7 @@ const client = new HttpClient(stores, {
 
 ### Request Hashing
 
-The `hashRequest` utility generates deterministic SHA-256 hashes for cache and deduplication keys. Parameter order does not matter, and numbers/booleans are normalized to strings before hashing (`"10"` and `10`, `"true"` and `true` produce the same hash).
+The `hashRequest` utility generates deterministic SHA-256 hashes for cache and deduplication keys. `HttpClient` hashes by URL origin + path + normalized query params so identical paths on different hosts do not collide. Parameter order does not matter, and numbers/booleans are normalized to strings before hashing (`"10"` and `10`, `"true"` and `true` produce the same hash).
 
 ```typescript
 import { hashRequest } from '@http-client-toolkit/core';

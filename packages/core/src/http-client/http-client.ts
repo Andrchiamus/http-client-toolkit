@@ -135,7 +135,7 @@ export class HttpClient implements HttpClientContract {
     params: Record<string, unknown>;
   } {
     const urlObj = new URL(url);
-    const endpoint = urlObj.pathname;
+    const endpoint = `${urlObj.origin}${urlObj.pathname}`;
     const params: Record<string, string> = {};
 
     urlObj.searchParams.forEach((value, key) => {
