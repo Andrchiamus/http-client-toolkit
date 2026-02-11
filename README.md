@@ -470,4 +470,4 @@ Useful root scripts:
 
 ## License
 
-MIT
+ISC

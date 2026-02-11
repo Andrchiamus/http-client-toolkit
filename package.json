@@ -47,7 +47,7 @@
   "engines": {
     "node": ">= 20.0.0"
   },
-  "license": "MIT",
+  "license": "ISC",
   "homepage": "https://github.com/AllyMurray/http-client-toolkit#readme",
   "bugs": {
     "url": "https://github.com/AllyMurray/http-client-toolkit/issues"
