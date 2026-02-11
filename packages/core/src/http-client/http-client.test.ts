@@ -224,10 +224,13 @@ describe('HttpClient', () => {
 
     nock(baseUrl).get('/priority-aware').reply(200, { ok: true });
 
+    let canProceedChecks = 0;
+
     const adaptiveRateLimitStoreStub = {
       async canProceed(_resource: string, priority = 'background') {
         priorities.canProceed.push(priority);
-        return false;
+        canProceedChecks += 1;
+        return canProceedChecks > 1;
       },
       async record(_resource: string, priority = 'background') {
         priorities.record.push(priority);
@@ -257,9 +260,37 @@ describe('HttpClient', () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(priorities.canProceed).toEqual(['user']);
+    expect(priorities.canProceed).toEqual(['user', 'user']);
     expect(priorities.getWaitTime).toEqual(['user']);
     expect(priorities.record).toEqual(['user']);
+  });
+
+  test('should throw when rate-limit wait exceeds maxWaitTime', async () => {
+    const rateLimitStoreStub = {
+      async canProceed() {
+        return false;
+      },
+      async record() {},
+      async getStatus() {
+        return { remaining: 0, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime() {
+        return 100;
+      },
+    } as const;
+
+    const client = new HttpClient(
+      { rateLimit: rateLimitStoreStub },
+      {
+        throwOnRateLimit: false,
+        maxWaitTime: 30,
+      },
+    );
+
+    await expect(client.get(`${baseUrl}/never-allowed`)).rejects.toThrow(
+      /maxWaitTime/,
+    );
   });
 
   test('should remain compatible with basic rate-limit stores', async () => {
@@ -271,10 +302,13 @@ describe('HttpClient', () => {
       record: 0,
     };
 
+    let canProceedChecks = 0;
+
     const basicRateLimitStoreStub = {
       async canProceed() {
         calls.canProceed += 1;
-        return false;
+        canProceedChecks += 1;
+        return canProceedChecks > 1;
       },
       async record() {
         calls.record += 1;
@@ -304,7 +338,7 @@ describe('HttpClient', () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(calls.canProceed).toBe(1);
+    expect(calls.canProceed).toBe(2);
     expect(calls.getWaitTime).toBe(1);
     expect(calls.record).toBe(1);
   });
@@ -336,6 +370,31 @@ describe('HttpClient', () => {
 
     await client.get(`${baseUrl}/same-path?q=1`);
     await client.get(`${alternateBaseUrl}/same-path?q=1`);
+
+    expect(observedHashes).toHaveLength(2);
+    expect(observedHashes[0]).not.toBe(observedHashes[1]);
+  });
+
+  test('should generate distinct cache keys for repeated query params', async () => {
+    const observedHashes: Array<string> = [];
+
+    nock(baseUrl).get('/multi').query(true).times(2).reply(200, { ok: true });
+
+    const cacheStoreStub = {
+      async get() {
+        return undefined;
+      },
+      async set(hash: string) {
+        observedHashes.push(hash);
+      },
+      async delete() {},
+      async clear() {},
+    } as const;
+
+    const client = new HttpClient({ cache: cacheStoreStub });
+
+    await client.get(`${baseUrl}/multi?tag=a&tag=b`);
+    await client.get(`${baseUrl}/multi?tag=b`);
 
     expect(observedHashes).toHaveLength(2);
     expect(observedHashes[0]).not.toBe(observedHashes[1]);

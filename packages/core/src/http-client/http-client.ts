@@ -218,10 +218,24 @@ export class HttpClient implements HttpClientContract {
   } {
     const urlObj = new URL(url);
     const endpoint = `${urlObj.origin}${urlObj.pathname}`;
-    const params: Record<string, string> = {};
+    const params: Record<string, unknown> = {};
 
     urlObj.searchParams.forEach((value, key) => {
-      params[key] = value;
+      const existing = params[key];
+
+      // Keep repeated query keys as arrays so semantically distinct URLs like
+      // `?tag=a&tag=b` and `?tag=b` do not hash to the same cache/dedupe key.
+      if (existing === undefined) {
+        params[key] = value;
+        return;
+      }
+
+      if (Array.isArray(existing)) {
+        existing.push(value);
+        return;
+      }
+
+      params[key] = [existing, value];
     });
 
     return { endpoint, params };
@@ -380,24 +394,84 @@ export class HttpClient implements HttpClientContract {
     signal?: AbortSignal,
   ): Promise<void> {
     const scope = this.getOriginScope(url);
-    const cooldownUntil = this.serverCooldowns.get(scope);
-    if (!cooldownUntil) {
-      return;
-    }
+    const startedAt = Date.now();
 
-    const waitMs = cooldownUntil - Date.now();
-    if (waitMs <= 0) {
-      this.serverCooldowns.delete(scope);
-      return;
+    // Re-check cooldown after each sleep so we never proceed while a server
+    // cooldown is still active. This avoids bypassing limits when cooldown
+    // duration is longer than maxWaitTime.
+    while (true) {
+      const cooldownUntil = this.serverCooldowns.get(scope);
+      if (!cooldownUntil) {
+        return;
+      }
+
+      const waitMs = cooldownUntil - Date.now();
+      if (waitMs <= 0) {
+        this.serverCooldowns.delete(scope);
+        return;
+      }
+
+      if (this.options.throwOnRateLimit) {
+        throw new Error(
+          `Rate limit exceeded for origin '${scope}'. Wait ${waitMs}ms before retrying.`,
+        );
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      const remainingWaitBudgetMs = this.options.maxWaitTime - elapsedMs;
+
+      if (remainingWaitBudgetMs <= 0) {
+        throw new Error(
+          `Rate limit wait exceeded maxWaitTime (${this.options.maxWaitTime}ms) for origin '${scope}'.`,
+        );
+      }
+
+      await wait(Math.min(waitMs, remainingWaitBudgetMs), signal);
     }
+  }
+
+  private async enforceStoreRateLimit(
+    resource: string,
+    priority: RequestPriority,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const rateLimit = this.stores.rateLimit as AdaptiveRateLimitStore;
+    const startedAt = Date.now();
 
     if (this.options.throwOnRateLimit) {
-      throw new Error(
-        `Rate limit exceeded for origin '${scope}'. Wait ${waitMs}ms before retrying.`,
-      );
+      const canProceed = await rateLimit.canProceed(resource, priority);
+      if (!canProceed) {
+        const waitTime = await rateLimit.getWaitTime(resource, priority);
+        throw new Error(
+          `Rate limit exceeded for resource '${resource}'. Wait ${waitTime}ms before retrying.`,
+        );
+      }
+      return;
     }
 
-    await wait(Math.min(waitMs, this.options.maxWaitTime), signal);
+    // Keep polling + waiting until the store explicitly allows the request or
+    // we exhaust maxWaitTime. A single one-off sleep can otherwise let a request
+    // through while still over limit.
+    while (!(await rateLimit.canProceed(resource, priority))) {
+      const suggestedWaitMs = await rateLimit.getWaitTime(resource, priority);
+      const elapsedMs = Date.now() - startedAt;
+      const remainingWaitBudgetMs = this.options.maxWaitTime - elapsedMs;
+
+      if (remainingWaitBudgetMs <= 0) {
+        throw new Error(
+          `Rate limit wait exceeded maxWaitTime (${this.options.maxWaitTime}ms) for resource '${resource}'.`,
+        );
+      }
+
+      // If a store reports "blocked" but no wait time, use a tiny backoff to
+      // avoid a tight CPU loop while still converging quickly.
+      const waitTime =
+        suggestedWaitMs > 0
+          ? Math.min(suggestedWaitMs, remainingWaitBudgetMs)
+          : Math.min(25, remainingWaitBudgetMs);
+
+      await wait(waitTime, signal);
+    }
   }
 
   private generateClientError(err: unknown): Error {
@@ -461,25 +535,7 @@ export class HttpClient implements HttpClientContract {
 
       // 3. Rate limiting - check if request can proceed
       if (this.stores.rateLimit) {
-        const rateLimit = this.stores.rateLimit as AdaptiveRateLimitStore;
-        const canProceed = await rateLimit.canProceed(resource, priority);
-
-        if (!canProceed) {
-          if (this.options.throwOnRateLimit) {
-            const waitTime = await rateLimit.getWaitTime(resource, priority);
-            throw new Error(
-              `Rate limit exceeded for resource '${resource}'. Wait ${waitTime}ms before retrying.`,
-            );
-          } else {
-            const waitTime = Math.min(
-              await rateLimit.getWaitTime(resource, priority),
-              this.options.maxWaitTime,
-            );
-            if (waitTime > 0) {
-              await wait(waitTime, signal);
-            }
-          }
-        }
+        await this.enforceStoreRateLimit(resource, priority, signal);
       }
 
       // 4. Execute the actual HTTP request
