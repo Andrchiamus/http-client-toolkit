@@ -6,7 +6,7 @@
 
 2. ~~**Incomplete README**~~ **RESOLVED** - Replaced with comprehensive README covering installation, quick start, full API reference for all packages, configuration options, usage examples, and a full integration example.
 
-3. **Missing CHANGELOG** - Set up CHANGELOG.md (can use changesets to auto-generate).
+3. ~~**Missing CHANGELOG**~~ **RESOLVED** - Initialized changesets with `changeset init`. CHANGELOG.md files are auto-generated per package when `changeset version` runs. Created initial changeset for 0.0.1 patch release.
 
 ## Important (Should Fix)
 
