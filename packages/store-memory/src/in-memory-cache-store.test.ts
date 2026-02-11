@@ -171,6 +171,26 @@ describe('InMemoryCacheStore', () => {
       stats = store.getStats();
       expect(stats.totalItems).toBe(0);
     });
+
+    it('should update memory usage when an expired item is lazily removed by get', async () => {
+      const lazyExpiryStore = new InMemoryCacheStore({ cleanupIntervalMs: 0 });
+
+      try {
+        await lazyExpiryStore.set('expiring', 'x'.repeat(256), 0.001);
+        expect(lazyExpiryStore.getStats().memoryUsageBytes).toBeGreaterThan(0);
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        const value = await lazyExpiryStore.get('expiring');
+        expect(value).toBeUndefined();
+
+        const stats = lazyExpiryStore.getStats();
+        expect(stats.totalItems).toBe(0);
+        expect(stats.memoryUsageBytes).toBe(0);
+      } finally {
+        lazyExpiryStore.destroy();
+      }
+    });
   });
 
   describe('cleanup', () => {

@@ -53,7 +53,12 @@ export class InMemoryCacheStore<T = unknown> implements CacheStore<T> {
   async get(hash: string): Promise<T | undefined> {
     const item = this.cache.get(hash);
 
-    if (!item || (item.expiresAt > 0 && Date.now() > item.expiresAt)) {
+    if (!item) {
+      return undefined;
+    }
+
+    if (item.expiresAt > 0 && Date.now() > item.expiresAt) {
+      this.totalSize -= item.size;
       this.cache.delete(hash);
       return undefined;
     }

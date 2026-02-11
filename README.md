@@ -237,6 +237,8 @@ const cache = new InMemoryCacheStore({
 
 Call `cache.destroy()` when done to clear the cleanup timer.
 
+Expired entries are removed lazily on `get` (and during scheduled cleanup), and cache memory statistics are updated immediately when those entries are evicted.
+
 ### InMemoryDedupeStore
 
 Prevents duplicate concurrent requests. If a request for the same hash is already in-flight, subsequent callers wait for the original to complete.
