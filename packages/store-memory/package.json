@@ -9,6 +9,7 @@
     "build": "tsup && npm run test",
     "lint": "eslint --fix src && prettier --write .",
     "test": "vitest run --dir=src",
+    "test:coverage": "vitest run --dir=src --coverage",
     "test:watch": "vitest --dir=src",
     "dev": "tsup --watch",
     "clean": "rimraf lib dist node_modules .turbo"
