@@ -2,6 +2,8 @@ import {
   AdaptiveConfigSchema,
   type AdaptiveRateLimitStore as IAdaptiveRateLimitStore,
   type RequestPriority,
+  type RateLimitConfig,
+  DEFAULT_RATE_LIMIT,
   AdaptiveCapacityCalculator,
   type ActivityMetrics,
   type DynamicCapacityResult,
@@ -9,6 +11,11 @@ import {
 import { z } from 'zod';
 
 export interface AdaptiveRateLimitStoreOptions {
+  /** Global/default rate-limit config applied when a resource-specific override is not provided. */
+  defaultConfig?: RateLimitConfig;
+  /** Optional per-resource overrides. */
+  resourceConfigs?: Map<string, RateLimitConfig>;
+  /** Adaptive configuration for priority-based rate limiting. */
   adaptiveConfig?: Partial<z.input<typeof AdaptiveConfigSchema>>;
 }
 
@@ -16,12 +23,16 @@ export interface AdaptiveRateLimitStoreOptions {
  * In-memory rate limiting store with adaptive priority-based capacity allocation
  */
 export class AdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
+  private defaultConfig: RateLimitConfig;
+  private resourceConfigs: Map<string, RateLimitConfig>;
   private activityMetrics = new Map<string, ActivityMetrics>();
   private capacityCalculator: AdaptiveCapacityCalculator;
   private lastCapacityUpdate = new Map<string, number>();
   private cachedCapacity = new Map<string, DynamicCapacityResult>();
 
   constructor(options: AdaptiveRateLimitStoreOptions = {}) {
+    this.defaultConfig = options.defaultConfig ?? DEFAULT_RATE_LIMIT;
+    this.resourceConfigs = options.resourceConfigs ?? new Map();
     this.capacityCalculator = new AdaptiveCapacityCalculator(
       options.adaptiveConfig,
     );
@@ -41,9 +52,11 @@ export class AdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
 
     // Get current usage
     const currentUserRequests = this.getCurrentUsage(
+      resource,
       metrics.recentUserRequests,
     );
     const currentBackgroundRequests = this.getCurrentUsage(
+      resource,
       metrics.recentBackgroundRequests,
     );
 
@@ -89,19 +102,23 @@ export class AdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
   }> {
     const metrics = this.getOrCreateActivityMetrics(resource);
     const capacity = this.calculateCurrentCapacity(resource, metrics);
-    const currentUserUsage = this.getCurrentUsage(metrics.recentUserRequests);
+    const currentUserUsage = this.getCurrentUsage(
+      resource,
+      metrics.recentUserRequests,
+    );
     const currentBackgroundUsage = this.getCurrentUsage(
+      resource,
       metrics.recentBackgroundRequests,
     );
+
+    const config = this.resourceConfigs.get(resource) ?? this.defaultConfig;
 
     return {
       remaining:
         capacity.userReserved -
         currentUserUsage +
         (capacity.backgroundMax - currentBackgroundUsage),
-      resetTime: new Date(
-        Date.now() + this.capacityCalculator.config.monitoringWindowMs,
-      ),
+      resetTime: new Date(Date.now() + config.windowMs),
       limit: this.getResourceLimit(resource),
       adaptive: {
         userReserved: capacity.userReserved,
@@ -197,9 +214,13 @@ export class AdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     return this.activityMetrics.get(resource)!;
   }
 
-  private getCurrentUsage(requests: Array<number>): number {
-    const oneHourAgo = Date.now() - 3600000; // 1 hour = 3600000ms
-    return requests.filter((timestamp) => timestamp > oneHourAgo).length;
+  private getCurrentUsage(
+    resource: string,
+    requests: Array<number>,
+  ): number {
+    const config = this.resourceConfigs.get(resource) ?? this.defaultConfig;
+    const windowStart = Date.now() - config.windowMs;
+    return requests.filter((timestamp) => timestamp > windowStart).length;
   }
 
   private cleanupOldRequests(requests: Array<number>): void {
@@ -210,9 +231,9 @@ export class AdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     }
   }
 
-  private getResourceLimit(_resource: string): number {
-    // Default Comic Vine API limits - 200 requests per hour for most resources
-    return 200;
+  private getResourceLimit(resource: string): number {
+    const config = this.resourceConfigs.get(resource) ?? this.defaultConfig;
+    return config.limit;
   }
 
   private getDefaultCapacity(resource: string): DynamicCapacityResult {

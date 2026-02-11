@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AdaptiveRateLimitStore } from './adaptive-rate-limit-store.js';
 
+const DEFAULT_LIMIT = 60;
+
 describe('AdaptiveRateLimitStore', () => {
   let store: AdaptiveRateLimitStore;
   const resource = 'test-resource';
@@ -29,6 +31,30 @@ describe('AdaptiveRateLimitStore', () => {
       });
 
       expect(customStore).toBeDefined();
+    });
+
+    it('should accept custom rate limit configuration', async () => {
+      const customStore = new AdaptiveRateLimitStore({
+        defaultConfig: { limit: 10, windowMs: 30_000 },
+      });
+
+      const status = await customStore.getStatus(resource);
+      expect(status.limit).toBe(10);
+    });
+
+    it('should accept per-resource configuration', async () => {
+      const customStore = new AdaptiveRateLimitStore({
+        defaultConfig: { limit: 100, windowMs: 60_000 },
+        resourceConfigs: new Map([
+          ['special', { limit: 5, windowMs: 10_000 }],
+        ]),
+      });
+
+      const defaultStatus = await customStore.getStatus(resource);
+      expect(defaultStatus.limit).toBe(100);
+
+      const specialStatus = await customStore.getStatus('special');
+      expect(specialStatus.limit).toBe(5);
     });
   });
 
@@ -74,7 +100,7 @@ describe('AdaptiveRateLimitStore', () => {
 
       const status = await store.getStatus(resource);
 
-      expect(status.adaptive?.userReserved).toBeGreaterThan(100); // More than 50% of 200
+      expect(status.adaptive?.userReserved).toBeGreaterThan(DEFAULT_LIMIT / 2);
       expect(status.adaptive?.recentUserActivity).toBe(15);
       expect(status.adaptive?.reason).toContain('High user activity');
     });
@@ -112,8 +138,8 @@ describe('AdaptiveRateLimitStore', () => {
 
       const status = await store.getStatus(resource);
 
-      expect(status.adaptive?.userReserved).toBeLessThan(100); // Less than 50%
-      expect(status.adaptive?.backgroundMax).toBeGreaterThan(100); // More than 50%
+      expect(status.adaptive?.userReserved).toBeLessThan(DEFAULT_LIMIT / 2);
+      expect(status.adaptive?.backgroundMax).toBeGreaterThan(DEFAULT_LIMIT / 2);
       expect(status.adaptive?.reason).toContain('background scale up');
     });
 
@@ -131,16 +157,15 @@ describe('AdaptiveRateLimitStore', () => {
       const status = await store.getStatus(resource);
 
       expect(status.adaptive?.userReserved).toBe(0);
-      expect(status.adaptive?.backgroundMax).toBe(200);
+      expect(status.adaptive?.backgroundMax).toBe(DEFAULT_LIMIT);
       expect(status.adaptive?.reason).toContain('full capacity to background');
     });
   });
 
   describe('rate limiting enforcement', () => {
     it('should reject requests when capacity is exceeded', async () => {
-      // Fill up user capacity - even in high activity mode, user gets max 180 out of 200
-      // So recording 185 requests should exceed capacity
-      for (let i = 0; i < 185; i++) {
+      // Fill up user capacity - recording more than the limit should exceed capacity
+      for (let i = 0; i < DEFAULT_LIMIT + 1; i++) {
         await store.record(resource, 'user');
       }
 
@@ -148,9 +173,9 @@ describe('AdaptiveRateLimitStore', () => {
     });
 
     it('should reject background requests when capacity is exceeded', async () => {
-      // With no user activity, background gets almost everything (195 out of 200)
-      // Recording 200 should exceed that
-      for (let i = 0; i < 200; i++) {
+      // With no user activity, background gets most of the capacity
+      // Recording more than the limit should exceed that
+      for (let i = 0; i < DEFAULT_LIMIT + 1; i++) {
         await store.record(resource, 'background');
       }
 
@@ -165,8 +190,8 @@ describe('AdaptiveRateLimitStore', () => {
         },
       });
 
-      // Fill up user capacity (high activity gives 180 capacity)
-      for (let i = 0; i < 185; i++) {
+      // Fill up user capacity
+      for (let i = 0; i < DEFAULT_LIMIT + 1; i++) {
         await noPauseStore.record(resource, 'user');
       }
 
@@ -185,7 +210,7 @@ describe('AdaptiveRateLimitStore', () => {
 
       expect(status.remaining).toBeGreaterThanOrEqual(0);
       expect(status.resetTime).toBeInstanceOf(Date);
-      expect(status.limit).toBe(200);
+      expect(status.limit).toBe(DEFAULT_LIMIT);
       expect(status.adaptive).toBeDefined();
       expect(status.adaptive?.userReserved).toBeGreaterThan(0);
       expect(status.adaptive?.backgroundMax).toBeGreaterThan(0);
@@ -229,8 +254,8 @@ describe('AdaptiveRateLimitStore', () => {
     });
 
     it('should return time until requests age out when capacity exceeded', async () => {
-      // Fill up user capacity (need 185 to exceed high activity allocation)
-      for (let i = 0; i < 185; i++) {
+      // Fill up user capacity
+      for (let i = 0; i < DEFAULT_LIMIT + 1; i++) {
         await store.record(resource, 'user');
       }
 
