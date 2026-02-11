@@ -293,6 +293,33 @@ describe('HttpClient', () => {
     );
   });
 
+  test('should throw immediately when throwOnRateLimit is true and store blocks', async () => {
+    const rateLimitStoreStub = {
+      async canProceed() {
+        return false;
+      },
+      async record() {},
+      async getStatus() {
+        return { remaining: 0, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime() {
+        return 1234;
+      },
+    } as const;
+
+    const client = new HttpClient(
+      { rateLimit: rateLimitStoreStub },
+      {
+        throwOnRateLimit: true,
+      },
+    );
+
+    await expect(client.get(`${baseUrl}/blocked-immediately`)).rejects.toThrow(
+      /Rate limit exceeded for resource/,
+    );
+  });
+
   test('should remain compatible with basic rate-limit stores', async () => {
     nock(baseUrl).get('/basic-rate-limit').reply(200, { ok: true });
 
@@ -400,6 +427,51 @@ describe('HttpClient', () => {
     expect(observedHashes[0]).not.toBe(observedHashes[1]);
   });
 
+  test('should generate distinct hashes when repeated params have extra values', async () => {
+    const observedHashes: Array<string> = [];
+
+    nock(baseUrl)
+      .get('/multi-values')
+      .query(true)
+      .times(2)
+      .reply(200, { ok: true });
+
+    const cacheStoreStub = {
+      async get() {
+        return undefined;
+      },
+      async set(hash: string) {
+        observedHashes.push(hash);
+      },
+      async delete() {},
+      async clear() {},
+    } as const;
+
+    const client = new HttpClient({ cache: cacheStoreStub });
+
+    await client.get(`${baseUrl}/multi-values?tag=a&tag=b&tag=c`);
+    await client.get(`${baseUrl}/multi-values?tag=a&tag=b`);
+
+    expect(observedHashes).toHaveLength(2);
+    expect(observedHashes[0]).not.toBe(observedHashes[1]);
+  });
+
+  test('should return cache hit without calling upstream', async () => {
+    const cacheStoreStub = {
+      async get() {
+        return { ok: true };
+      },
+      async set() {},
+      async delete() {},
+      async clear() {},
+    } as const;
+
+    const client = new HttpClient({ cache: cacheStoreStub });
+    const result = await client.get<{ ok: boolean }>(`${baseUrl}/cache-hit`);
+
+    expect(result.ok).toBe(true);
+  });
+
   test('should execute only one upstream request when dedupe supports registerOrJoin', async () => {
     type Deferred = {
       promise: Promise<unknown>;
@@ -489,5 +561,290 @@ describe('HttpClient', () => {
     expect(resultA).toEqual({ ok: true });
     expect(resultB).toEqual({ ok: true });
     expect(registerCalls).toBe(2);
+  });
+
+  test('should return deduped result immediately when waitFor has a value', async () => {
+    const dedupeStoreStub = {
+      async waitFor() {
+        return { from: 'dedupe' };
+      },
+      async register() {
+        return 'job-1';
+      },
+      async complete() {},
+      async fail() {},
+      async isInProgress() {
+        return true;
+      },
+    } as const;
+
+    const client = new HttpClient({ dedupe: dedupeStoreStub });
+    const result = await client.get<{ from: string }>(`${baseUrl}/not-called`);
+
+    expect(result).toEqual({ from: 'dedupe' });
+  });
+
+  test('should call dedupe fail when request errors after register path', async () => {
+    const calls = {
+      register: 0,
+      fail: 0,
+    };
+
+    const dedupeStoreStub = {
+      async waitFor() {
+        return undefined;
+      },
+      async register() {
+        calls.register += 1;
+        return 'job-1';
+      },
+      async complete() {},
+      async fail() {
+        calls.fail += 1;
+      },
+      async isInProgress() {
+        return true;
+      },
+    } as const;
+
+    nock(baseUrl)
+      .get('/dedupe-failure')
+      .reply(503, { message: 'Service unavailable' }, { 'Retry-After': '0' });
+
+    const client = new HttpClient({ dedupe: dedupeStoreStub });
+
+    await expect(client.get(`${baseUrl}/dedupe-failure`)).rejects.toThrow(
+      HttpClientError,
+    );
+    expect(calls.register).toBe(1);
+    expect(calls.fail).toBe(1);
+  });
+
+  test('should exercise private header parsing helpers', () => {
+    const client = new HttpClient(
+      {},
+      {
+        rateLimitHeaders: {
+          retryAfter: ['  retry-after  ', ''],
+        },
+      },
+    );
+
+    const privateClient = client as unknown as {
+      normalizeHeaderNames: (
+        providedNames: Array<string> | undefined,
+        defaultNames: ReadonlyArray<string>,
+      ) => Array<string>;
+      getHeaderValue: (
+        headers: Record<string, unknown> | undefined,
+        names: Array<string>,
+      ) => string | undefined;
+      parseIntegerHeader: (value: string | undefined) => number | undefined;
+      parseRetryAfterMs: (value: string | undefined) => number | undefined;
+      parseResetMs: (value: string | undefined) => number | undefined;
+      parseCombinedRateLimitHeader: (value: string | undefined) => {
+        remaining?: number;
+        resetMs?: number;
+      };
+      getOriginScope: (url: string) => string;
+      inferResource: (url: string) => string;
+    };
+
+    expect(privateClient.normalizeHeaderNames(undefined, ['x-a'])).toEqual([
+      'x-a',
+    ]);
+    expect(privateClient.normalizeHeaderNames(['   '], ['x-a'])).toEqual([
+      'x-a',
+    ]);
+    expect(privateClient.getHeaderValue(undefined, ['x-test'])).toBeUndefined();
+    expect(privateClient.getHeaderValue({ 'x-test': ['10'] }, ['x-test'])).toBe(
+      '10',
+    );
+    expect(privateClient.parseIntegerHeader('-1')).toBeUndefined();
+    expect(privateClient.parseIntegerHeader('abc')).toBeUndefined();
+
+    expect(privateClient.parseRetryAfterMs('1')).toBe(1000);
+    expect(
+      privateClient.parseRetryAfterMs(
+        new Date(Date.now() + 1_000).toUTCString(),
+      ),
+    ).toBeGreaterThan(0);
+    expect(privateClient.parseRetryAfterMs('not-a-date')).toBeUndefined();
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    expect(privateClient.parseResetMs(String(nowSeconds + 2))).toBeGreaterThan(
+      0,
+    );
+    expect(privateClient.parseResetMs('0')).toBe(0);
+
+    expect(privateClient.parseCombinedRateLimitHeader('r=3; t=2')).toEqual({
+      remaining: 3,
+      resetMs: 2000,
+    });
+    expect(privateClient.parseCombinedRateLimitHeader('t=2')).toEqual({
+      remaining: undefined,
+      resetMs: 2000,
+    });
+    expect(privateClient.parseCombinedRateLimitHeader('r=5')).toEqual({
+      remaining: 5,
+      resetMs: undefined,
+    });
+    expect(privateClient.parseCombinedRateLimitHeader(undefined)).toEqual({});
+
+    expect(privateClient.getOriginScope('not-a-url')).toBe('unknown');
+    expect(privateClient.inferResource('/still-not-a-url')).toBe('unknown');
+    expect(privateClient.inferResource(`${baseUrl}/`)).toBe('unknown');
+
+    const privateApplyClient = client as unknown as {
+      applyServerRateLimitHints: (
+        url: string,
+        headers: Record<string, unknown> | undefined,
+        statusCode?: number,
+      ) => void;
+    };
+    expect(() => {
+      privateApplyClient.applyServerRateLimitHints(
+        `${baseUrl}/no-headers`,
+        undefined,
+      );
+    }).not.toThrow();
+  });
+
+  test('should exercise private cooldown and rate-limit helper branches', async () => {
+    const allowRateLimitStoreStub = {
+      async canProceed() {
+        return true;
+      },
+      async record() {},
+      async getStatus() {
+        return { remaining: 1, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime() {
+        return 0;
+      },
+    } as const;
+
+    const client = new HttpClient(
+      { rateLimit: allowRateLimitStoreStub },
+      {
+        throwOnRateLimit: false,
+        maxWaitTime: 50,
+      },
+    );
+
+    const privateClient = client as unknown as {
+      serverCooldowns: Map<string, number>;
+      getOriginScope: (url: string) => string;
+      enforceServerCooldown: (
+        url: string,
+        signal?: AbortSignal,
+      ) => Promise<void>;
+      enforceStoreRateLimit: (
+        resource: string,
+        priority: 'user' | 'background',
+        signal?: AbortSignal,
+      ) => Promise<void>;
+    };
+
+    const scope = privateClient.getOriginScope(baseUrl);
+    privateClient.serverCooldowns.set(scope, Date.now() + 1);
+    await expect(
+      privateClient.enforceServerCooldown(`${baseUrl}/cooldown-wait`),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      privateClient.enforceStoreRateLimit('items', 'background'),
+    ).resolves.toBeUndefined();
+  });
+
+  test('should support non-aborted signals during rate-limit wait', async () => {
+    let checks = 0;
+    const rateLimitStoreStub = {
+      async canProceed() {
+        checks += 1;
+        return checks > 1;
+      },
+      async record() {},
+      async getStatus() {
+        return { remaining: 0, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime() {
+        return 1;
+      },
+    } as const;
+
+    nock(baseUrl).get('/signal-wait').reply(200, { ok: true });
+
+    const client = new HttpClient(
+      { rateLimit: rateLimitStoreStub },
+      {
+        throwOnRateLimit: false,
+        maxWaitTime: 100,
+      },
+    );
+
+    const controller = new AbortController();
+    const result = await client.get<{ ok: boolean }>(`${baseUrl}/signal-wait`, {
+      signal: controller.signal,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  test('should exercise remaining private rate-limit edge branches', async () => {
+    const allowRateLimitStoreStub = {
+      async canProceed() {
+        return true;
+      },
+      async record() {},
+      async getStatus() {
+        return { remaining: 1, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime() {
+        return 0;
+      },
+    } as const;
+
+    const strictClient = new HttpClient(
+      { rateLimit: allowRateLimitStoreStub },
+      {
+        throwOnRateLimit: true,
+      },
+    );
+
+    const strictPrivate = strictClient as unknown as {
+      enforceStoreRateLimit: (
+        resource: string,
+        priority: 'user' | 'background',
+      ) => Promise<void>;
+    };
+
+    await expect(
+      strictPrivate.enforceStoreRateLimit('items', 'user'),
+    ).resolves.toBeUndefined();
+
+    const waitingClient = new HttpClient(
+      {},
+      {
+        throwOnRateLimit: false,
+        maxWaitTime: 0,
+      },
+    );
+
+    const waitingPrivate = waitingClient as unknown as {
+      serverCooldowns: Map<string, number>;
+      getOriginScope: (url: string) => string;
+      enforceServerCooldown: (url: string) => Promise<void>;
+    };
+
+    const scope = waitingPrivate.getOriginScope(baseUrl);
+    waitingPrivate.serverCooldowns.set(scope, Date.now() + 50);
+
+    await expect(
+      waitingPrivate.enforceServerCooldown(`${baseUrl}/max-wait-exceeded`),
+    ).rejects.toThrow(/maxWaitTime/);
   });
 });
