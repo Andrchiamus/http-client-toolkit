@@ -145,15 +145,6 @@ export class HttpClient implements HttpClientContract {
     return { endpoint, params };
   }
 
-  /**
-   * Type guard to check if a rate limit store supports adaptive features
-   */
-  private isAdaptiveRateLimitStore(
-    store: RateLimitStore | AdaptiveRateLimitStore,
-  ): store is AdaptiveRateLimitStore {
-    return 'canProceed' in store && store.canProceed.length >= 2;
-  }
-
   private generateClientError(err: unknown): Error {
     // If a custom error handler is provided, use it
     if (this.options.errorHandler) {
@@ -202,24 +193,18 @@ export class HttpClient implements HttpClientContract {
 
       // 3. Rate limiting - check if request can proceed
       if (this.stores.rateLimit) {
-        const isAdaptive = this.isAdaptiveRateLimitStore(this.stores.rateLimit);
-        const canProceed = isAdaptive
-          ? await this.stores.rateLimit.canProceed(resource, priority)
-          : await this.stores.rateLimit.canProceed(resource);
+        const rateLimit = this.stores.rateLimit as AdaptiveRateLimitStore;
+        const canProceed = await rateLimit.canProceed(resource, priority);
 
         if (!canProceed) {
           if (this.options.throwOnRateLimit) {
-            const waitTime = isAdaptive
-              ? await this.stores.rateLimit.getWaitTime(resource, priority)
-              : await this.stores.rateLimit.getWaitTime(resource);
+            const waitTime = await rateLimit.getWaitTime(resource, priority);
             throw new Error(
               `Rate limit exceeded for resource '${resource}'. Wait ${waitTime}ms before retrying.`,
             );
           } else {
             const waitTime = Math.min(
-              isAdaptive
-                ? await this.stores.rateLimit.getWaitTime(resource, priority)
-                : await this.stores.rateLimit.getWaitTime(resource),
+              await rateLimit.getWaitTime(resource, priority),
               this.options.maxWaitTime,
             );
             if (waitTime > 0) {
@@ -247,12 +232,8 @@ export class HttpClient implements HttpClientContract {
 
       // 7. Record the request for rate limiting
       if (this.stores.rateLimit) {
-        const isAdaptive = this.isAdaptiveRateLimitStore(this.stores.rateLimit);
-        if (isAdaptive) {
-          await this.stores.rateLimit.record(resource, priority);
-        } else {
-          await this.stores.rateLimit.record(resource);
-        }
+        const rateLimit = this.stores.rateLimit as AdaptiveRateLimitStore;
+        await rateLimit.record(resource, priority);
       }
 
       // 8. Cache the result

@@ -134,6 +134,8 @@ const data = await client.get(url, { priority: 'background' });
 
 The adaptive store dynamically shifts capacity between user and background pools based on recent activity patterns.
 
+`HttpClient` always forwards `priority` to rate-limit store methods. Adaptive stores use it to allocate capacity; basic `RateLimitStore` implementations safely ignore the extra argument.
+
 Rate limits are tracked per inferred resource name. The client derives this from the URL path's last segment (for example, `/v1/users/42` maps to resource `42`).
 Use explicit `resourceConfigs` keys that match your URL patterns.
 

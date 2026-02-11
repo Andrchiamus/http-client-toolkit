@@ -143,4 +143,102 @@ describe('HttpClient', () => {
       }),
     ).rejects.toMatchObject({ name: 'AbortError' });
   });
+
+  test('should pass request priority to adaptive rate-limit methods', async () => {
+    const priorities: {
+      canProceed: Array<string>;
+      getWaitTime: Array<string>;
+      record: Array<string>;
+    } = {
+      canProceed: [],
+      getWaitTime: [],
+      record: [],
+    };
+
+    nock(baseUrl).get('/priority-aware').reply(200, { ok: true });
+
+    const adaptiveRateLimitStoreStub = {
+      async canProceed(_resource: string, priority = 'background') {
+        priorities.canProceed.push(priority);
+        return false;
+      },
+      async record(_resource: string, priority = 'background') {
+        priorities.record.push(priority);
+      },
+      async getStatus() {
+        return { remaining: 0, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime(_resource: string, priority = 'background') {
+        priorities.getWaitTime.push(priority);
+        return 0;
+      },
+    } as const;
+
+    const client = new HttpClient(
+      { rateLimit: adaptiveRateLimitStoreStub },
+      {
+        throwOnRateLimit: false,
+      },
+    );
+
+    const result = await client.get<{ ok: boolean }>(
+      `${baseUrl}/priority-aware`,
+      {
+        priority: 'user',
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(priorities.canProceed).toEqual(['user']);
+    expect(priorities.getWaitTime).toEqual(['user']);
+    expect(priorities.record).toEqual(['user']);
+  });
+
+  test('should remain compatible with basic rate-limit stores', async () => {
+    nock(baseUrl).get('/basic-rate-limit').reply(200, { ok: true });
+
+    const calls = {
+      canProceed: 0,
+      getWaitTime: 0,
+      record: 0,
+    };
+
+    const basicRateLimitStoreStub = {
+      async canProceed() {
+        calls.canProceed += 1;
+        return false;
+      },
+      async record() {
+        calls.record += 1;
+      },
+      async getStatus() {
+        return { remaining: 0, resetTime: new Date(), limit: 60 };
+      },
+      async reset() {},
+      async getWaitTime() {
+        calls.getWaitTime += 1;
+        return 0;
+      },
+    } as const;
+
+    const client = new HttpClient(
+      { rateLimit: basicRateLimitStoreStub },
+      {
+        throwOnRateLimit: false,
+      },
+    );
+
+    const result = await client.get<{ ok: boolean }>(
+      `${baseUrl}/basic-rate-limit`,
+      {
+        priority: 'user',
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls.canProceed).toBe(1);
+    expect(calls.getWaitTime).toBe(1);
+    expect(calls.record).toBe(1);
+  });
 });
