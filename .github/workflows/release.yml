@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      CI: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          AUTHOR_NAME=$(git log -1 --pretty=format:'%an')
+          AUTHOR_EMAIL=$(git log -1 --pretty=format:'%ae')
+          echo "Setting git config to: $AUTHOR_NAME <$AUTHOR_EMAIL>"
+          git config user.name "$AUTHOR_NAME"
+          git config user.email "$AUTHOR_EMAIL"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm run build
+
+      - name: Tests
+        run: pnpm test
+
+      - name: Check for changesets
+        id: changesets
+        run: |
+          CHANGESET_COUNT=$(ls .changeset/*.md 2>/dev/null | grep -v README.md | wc -l | tr -d ' ')
+          echo "count=$CHANGESET_COUNT"
+          if [ "$CHANGESET_COUNT" -gt 0 ]; then
+            echo "has_changesets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changesets=false" >> "$GITHUB_OUTPUT"
+            echo "No changesets found, skipping publish"
+          fi
+
+      - name: Version packages
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: |
+          npx changeset version
+          git add .
+          git commit -m "chore: release packages"
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update npm for trusted publishing
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: npm install -g npm@latest
+
+      - name: Publish packages
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: npx changeset publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+
+      - name: Push tags
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: git push origin --tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub releases
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: |
+          for TAG in $(git tag --points-at HEAD); do
+            echo "Creating release for $TAG"
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
