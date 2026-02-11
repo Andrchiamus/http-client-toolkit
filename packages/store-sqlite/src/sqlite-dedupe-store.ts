@@ -176,46 +176,65 @@ export class SQLiteDedupeStore<T = unknown> implements DedupeStore<T> {
   }
 
   async register(hash: string): Promise<string> {
+    const registration = await this.registerOrJoin(hash);
+    return registration.jobId;
+  }
+
+  async registerOrJoin(hash: string): Promise<{
+    jobId: string;
+    isOwner: boolean;
+  }> {
     if (this.isDestroyed) {
       throw new Error('Dedupe store has been destroyed');
     }
 
-    const existingJob = await this.db
-      .select()
-      .from(dedupeTable)
-      .where(eq(dedupeTable.hash, hash))
-      .limit(1);
-
-    if (existingJob.length > 0) {
-      const job = existingJob[0];
-      if (job && job.status === 'pending') {
-        return job.jobId;
-      }
-    }
-
-    // Create new job
-    const jobId = randomUUID();
     const now = Date.now();
+    const candidateJobId = randomUUID();
 
-    await this.db
-      .insert(dedupeTable)
-      .values({
-        hash,
-        jobId,
-        status: 'pending',
-        createdAt: now,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: dedupeTable.hash,
-        set: {
+    const registerTransaction = this.sqlite.transaction(
+      (requestHash: string, createdAt: number, jobId: string) => {
+        const existing = this.sqlite
+          .prepare(
+            'SELECT job_id as jobId, status FROM dedupe_jobs WHERE hash = ? LIMIT 1',
+          )
+          .get(requestHash) as
+          | {
+              jobId: string;
+              status: string;
+            }
+          | undefined;
+
+        if (existing && existing.status === 'pending') {
+          return {
+            jobId: existing.jobId,
+            isOwner: false,
+          };
+        }
+
+        this.sqlite
+          .prepare(
+            `
+            INSERT INTO dedupe_jobs (hash, job_id, status, result, error, created_at, updated_at)
+            VALUES (?, ?, 'pending', NULL, NULL, ?, ?)
+            ON CONFLICT(hash) DO UPDATE SET
+              job_id = excluded.job_id,
+              status = excluded.status,
+              result = NULL,
+              error = NULL,
+              created_at = excluded.created_at,
+              updated_at = excluded.updated_at
+            `,
+          )
+          .run(requestHash, jobId, createdAt, createdAt);
+
+        return {
           jobId,
-          status: 'pending',
-          updatedAt: now,
-        },
-      });
+          isOwner: true,
+        };
+      },
+    );
 
-    return jobId;
+    return registerTransaction(hash, now, candidateJobId);
   }
 
   async complete(hash: string, value: T | undefined): Promise<void> {

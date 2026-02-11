@@ -84,11 +84,21 @@ export class InMemoryDedupeStore<T = unknown> implements DedupeStore<T> {
   }
 
   async register(hash: string): Promise<string> {
+    const registration = await this.registerOrJoin(hash);
+    return registration.jobId;
+  }
+
+  async registerOrJoin(hash: string): Promise<{
+    jobId: string;
+    isOwner: boolean;
+  }> {
     // Check if there's already a job for this hash
     const existingJob = this.jobs.get(hash);
     if (existingJob) {
-      // Return the existing job ID
-      return existingJob.jobId;
+      return {
+        jobId: existingJob.jobId,
+        isOwner: false,
+      };
     }
 
     // Create a new job
@@ -106,7 +116,10 @@ export class InMemoryDedupeStore<T = unknown> implements DedupeStore<T> {
 
     this.jobs.set(hash, job);
     this.totalJobsProcessed++;
-    return jobId;
+    return {
+      jobId,
+      isOwner: true,
+    };
   }
 
   async complete(hash: string, value: T): Promise<void> {

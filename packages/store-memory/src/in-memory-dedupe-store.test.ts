@@ -37,6 +37,15 @@ describe('InMemoryDedupeStore', () => {
       expect(typeof jobId).toBe('string');
     });
 
+    it('should return ownership information from registerOrJoin', async () => {
+      const first = await store.registerOrJoin('owner-hash');
+      const second = await store.registerOrJoin('owner-hash');
+
+      expect(first.isOwner).toBe(true);
+      expect(second.isOwner).toBe(false);
+      expect(first.jobId).toBe(second.jobId);
+    });
+
     it('should return undefined for non-existent jobs', async () => {
       const result = await store.waitFor('non-existent-hash');
       expect(result).toBeUndefined();

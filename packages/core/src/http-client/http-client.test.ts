@@ -274,4 +274,95 @@ describe('HttpClient', () => {
     expect(observedHashes).toHaveLength(2);
     expect(observedHashes[0]).not.toBe(observedHashes[1]);
   });
+
+  test('should execute only one upstream request when dedupe supports registerOrJoin', async () => {
+    type Deferred = {
+      promise: Promise<unknown>;
+      resolve: (value: unknown) => void;
+      reject: (reason: unknown) => void;
+    };
+
+    const jobs = new Map<string, Deferred>();
+    let registerCalls = 0;
+
+    const dedupeStoreStub = {
+      async waitFor(hash: string) {
+        const job = jobs.get(hash);
+        if (!job) {
+          return undefined;
+        }
+
+        try {
+          return await job.promise;
+        } catch {
+          return undefined;
+        }
+      },
+      async register(hash: string) {
+        const existing = jobs.get(hash);
+        if (existing) {
+          return 'shared-job';
+        }
+
+        let resolve!: (value: unknown) => void;
+        let reject!: (reason: unknown) => void;
+        const promise = new Promise<unknown>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+        jobs.set(hash, { promise, resolve, reject });
+        return 'owner-job';
+      },
+      async registerOrJoin(hash: string) {
+        registerCalls += 1;
+        const existing = jobs.get(hash);
+
+        if (existing) {
+          return { jobId: 'shared-job', isOwner: false };
+        }
+
+        let resolve!: (value: unknown) => void;
+        let reject!: (reason: unknown) => void;
+        const promise = new Promise<unknown>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        });
+
+        jobs.set(hash, { promise, resolve, reject });
+        return { jobId: 'owner-job', isOwner: true };
+      },
+      async complete(hash: string, value: unknown) {
+        const job = jobs.get(hash);
+        if (job) {
+          job.resolve(value);
+        }
+      },
+      async fail(hash: string, error: Error) {
+        const job = jobs.get(hash);
+        if (job) {
+          job.reject(error);
+        }
+      },
+      async isInProgress(hash: string) {
+        return jobs.has(hash);
+      },
+    } as const;
+
+    nock(baseUrl)
+      .get('/dedupe-race')
+      .query({ page: '1' })
+      .delay(50)
+      .reply(200, { ok: true });
+
+    const client = new HttpClient({ dedupe: dedupeStoreStub });
+
+    const [resultA, resultB] = await Promise.all([
+      client.get<{ ok: boolean }>(`${baseUrl}/dedupe-race?page=1`),
+      client.get<{ ok: boolean }>(`${baseUrl}/dedupe-race?page=1`),
+    ]);
+
+    expect(resultA).toEqual({ ok: true });
+    expect(resultB).toEqual({ ok: true });
+    expect(registerCalls).toBe(2);
+  });
 });

@@ -17,6 +17,22 @@ export interface DedupeStore<T = unknown> {
   register(hash: string): Promise<string>;
 
   /**
+   * Atomically register or join an in-flight request.
+   *
+   * When provided, this allows callers to determine ownership and guarantees
+   * that only one caller executes the upstream request while others wait.
+   * Implementations that do not provide this method remain compatible, but
+   * may allow duplicate upstream requests under extreme races.
+   *
+   * @param hash The hash key of the request
+   * @returns The job id and whether the caller owns execution
+   */
+  registerOrJoin?(hash: string): Promise<{
+    jobId: string;
+    isOwner: boolean;
+  }>;
+
+  /**
    * Mark a request as complete with its result
    * @param hash The hash key of the request
    * @param value The result of the request

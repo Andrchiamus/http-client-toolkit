@@ -188,7 +188,18 @@ export class HttpClient implements HttpClientContract {
           return existingResult as Result;
         }
 
-        await this.stores.dedupe.register(hash);
+        if (this.stores.dedupe.registerOrJoin) {
+          const registration = await this.stores.dedupe.registerOrJoin(hash);
+
+          if (!registration.isOwner) {
+            const joinedResult = await this.stores.dedupe.waitFor(hash);
+            if (joinedResult !== undefined) {
+              return joinedResult as Result;
+            }
+          }
+        } else {
+          await this.stores.dedupe.register(hash);
+        }
       }
 
       // 3. Rate limiting - check if request can proceed
