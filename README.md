@@ -4,21 +4,21 @@ A modular HTTP client toolkit with pluggable caching, deduplication, and rate li
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| [`@http-client-toolkit/core`](#core) | HTTP client and store interfaces |
-| [`@http-client-toolkit/store-memory`](#in-memory-stores) | In-memory store implementations |
-| [`@http-client-toolkit/store-sqlite`](#sqlite-stores) | SQLite-backed store implementations |
+| Package                                                  | Description                         |
+| -------------------------------------------------------- | ----------------------------------- |
+| [`@http-client-toolkit/core`](#core)                     | HTTP client and store interfaces    |
+| [`@http-client-toolkit/store-memory`](#in-memory-stores) | In-memory store implementations     |
+| [`@http-client-toolkit/store-sqlite`](#sqlite-stores)    | SQLite-backed store implementations |
 
 ## Installation
 
-Core package (required):
+Install the core client first:
 
 ```bash
 npm install @http-client-toolkit/core
 ```
 
-Then pick a store backend:
+Then pick one or more store backends:
 
 ```bash
 npm install @http-client-toolkit/store-memory
@@ -30,15 +30,17 @@ npm install @http-client-toolkit/store-sqlite
 
 Requires Node.js >= 20.
 
+If you are contributing in this repository (instead of consuming published packages), use `pnpm install` at the repo root.
+
 ## Quick Start
 
 ```typescript
-import { HttpClient } from "@http-client-toolkit/core";
+import { HttpClient } from '@http-client-toolkit/core';
 import {
   InMemoryCacheStore,
   InMemoryDedupeStore,
   InMemoryRateLimitStore,
-} from "@http-client-toolkit/store-memory";
+} from '@http-client-toolkit/store-memory';
 
 const client = new HttpClient(
   {
@@ -49,7 +51,9 @@ const client = new HttpClient(
   { defaultCacheTTL: 300 },
 );
 
-const data = await client.get<{ name: string }>("https://api.example.com/user/1");
+const data = await client.get<{ name: string }>(
+  'https://api.example.com/user/1',
+);
 ```
 
 Every store is optional. Use only what you need:
@@ -76,24 +80,34 @@ The core package provides the `HttpClient` class and all store interfaces.
 new HttpClient(stores?, options?)
 ```
 
+`HttpClient` currently exposes a single request method: `get(url, options?)`.
+The `url` must be an absolute URL (for example, `https://api.example.com/items`).
+
+**Request options (`client.get`)**
+
+| Property   | Type                     | Default        | Description                         |
+| ---------- | ------------------------ | -------------- | ----------------------------------- |
+| `signal`   | `AbortSignal`            | -              | Cancels wait + request when aborted |
+| `priority` | `'user' \| 'background'` | `'background'` | Used by adaptive rate-limit stores  |
+
 **Stores:**
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `cache` | `CacheStore` | Response caching |
-| `dedupe` | `DedupeStore` | Request deduplication |
-| `rateLimit` | `RateLimitStore \| AdaptiveRateLimitStore` | Rate limiting |
+| Property    | Type                                       | Description           |
+| ----------- | ------------------------------------------ | --------------------- |
+| `cache`     | `CacheStore`                               | Response caching      |
+| `dedupe`    | `DedupeStore`                              | Request deduplication |
+| `rateLimit` | `RateLimitStore \| AdaptiveRateLimitStore` | Rate limiting         |
 
 **Options:**
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `defaultCacheTTL` | `number` | `3600` | Cache TTL in seconds |
-| `throwOnRateLimit` | `boolean` | `true` | Throw when rate limited vs. wait |
-| `maxWaitTime` | `number` | `60000` | Max wait time (ms) before throwing |
-| `responseTransformer` | `(data: unknown) => unknown` | - | Transform raw response data |
-| `responseHandler` | `(data: unknown) => unknown` | - | Validate/process transformed data |
-| `errorHandler` | `(error: unknown) => Error` | - | Convert errors to domain-specific types |
+| Property              | Type                         | Default | Description                             |
+| --------------------- | ---------------------------- | ------- | --------------------------------------- |
+| `defaultCacheTTL`     | `number`                     | `3600`  | Cache TTL in seconds                    |
+| `throwOnRateLimit`    | `boolean`                    | `true`  | Throw when rate limited vs. wait        |
+| `maxWaitTime`         | `number`                     | `60000` | Max wait time (ms) before throwing      |
+| `responseTransformer` | `(data: unknown) => unknown` | -       | Transform raw response data             |
+| `responseHandler`     | `(data: unknown) => unknown` | -       | Validate/process transformed data       |
+| `errorHandler`        | `(error: unknown) => Error`  | -       | Convert errors to domain-specific types |
 
 ### Request Flow
 
@@ -112,13 +126,16 @@ When using an `AdaptiveRateLimitStore`, requests can declare a priority:
 
 ```typescript
 // User-initiated request - gets higher rate limit allocation
-const data = await client.get(url, { priority: "user" });
+const data = await client.get(url, { priority: 'user' });
 
 // Background/automated request - lower priority
-const data = await client.get(url, { priority: "background" });
+const data = await client.get(url, { priority: 'background' });
 ```
 
 The adaptive store dynamically shifts capacity between user and background pools based on recent activity patterns.
+
+Rate limits are tracked per inferred resource name. The client derives this from the URL path's last segment (for example, `/v1/users/42` maps to resource `42`).
+Use explicit `resourceConfigs` keys that match your URL patterns.
 
 ### Cancellation
 
@@ -137,13 +154,13 @@ controller.abort();
 All HTTP errors are wrapped in `HttpClientError`:
 
 ```typescript
-import { HttpClientError } from "@http-client-toolkit/core";
+import { HttpClientError } from '@http-client-toolkit/core';
 
 try {
   await client.get(url);
 } catch (error) {
   if (error instanceof HttpClientError) {
-    console.log(error.message);    // Error description
+    console.log(error.message); // Error description
     console.log(error.statusCode); // HTTP status code (if applicable)
   }
 }
@@ -155,7 +172,7 @@ Use `errorHandler` to convert errors into your own domain types:
 const client = new HttpClient(stores, {
   errorHandler: (error) => {
     if (error instanceof HttpClientError && error.statusCode === 404) {
-      return new NotFoundError("Resource not found");
+      return new NotFoundError('Resource not found');
     }
     return error instanceof Error ? error : new Error(String(error));
   },
@@ -167,13 +184,13 @@ const client = new HttpClient(stores, {
 Use `responseTransformer` to normalize API responses (e.g. convert keys to camelCase) and `responseHandler` to validate or unwrap them:
 
 ```typescript
-import camelcaseKeys from "camelcase-keys";
+import camelcaseKeys from 'camelcase-keys';
 
 const client = new HttpClient(stores, {
   responseTransformer: (data) => camelcaseKeys(data, { deep: true }),
   responseHandler: (data) => {
-    if (!data || typeof data !== "object") {
-      throw new Error("Unexpected response shape");
+    if (!data || typeof data !== 'object') {
+      throw new Error('Unexpected response shape');
     }
     return data;
   },
@@ -182,13 +199,13 @@ const client = new HttpClient(stores, {
 
 ### Request Hashing
 
-The `hashRequest` utility generates deterministic SHA-256 hashes for cache and deduplication keys. Parameter order does not matter, and numeric strings are treated as equivalent to numbers (`"10"` and `10` produce the same hash).
+The `hashRequest` utility generates deterministic SHA-256 hashes for cache and deduplication keys. Parameter order does not matter, and numbers/booleans are normalized to strings before hashing (`"10"` and `10`, `"true"` and `true` produce the same hash).
 
 ```typescript
-import { hashRequest } from "@http-client-toolkit/core";
+import { hashRequest } from '@http-client-toolkit/core';
 
-const hash = hashRequest("https://api.example.com/search", {
-  q: "test",
+const hash = hashRequest('https://api.example.com/search', {
+  q: 'test',
   page: 1,
 });
 ```
@@ -206,13 +223,13 @@ npm install @http-client-toolkit/store-memory
 LRU cache with TTL support and dual eviction limits (item count + memory usage).
 
 ```typescript
-import { InMemoryCacheStore } from "@http-client-toolkit/store-memory";
+import { InMemoryCacheStore } from '@http-client-toolkit/store-memory';
 
 const cache = new InMemoryCacheStore({
-  maxItems: 1000,            // Default: 1000
+  maxItems: 1000, // Default: 1000
   maxMemoryBytes: 50_000_000, // Default: 50 MB
   cleanupIntervalMs: 60_000, // Default: 60s. Set to 0 to disable.
-  evictionRatio: 0.1,        // Default: 10% evicted when limits exceeded
+  evictionRatio: 0.1, // Default: 10% evicted when limits exceeded
 });
 ```
 
@@ -223,10 +240,10 @@ Call `cache.destroy()` when done to clear the cleanup timer.
 Prevents duplicate concurrent requests. If a request for the same hash is already in-flight, subsequent callers wait for the original to complete.
 
 ```typescript
-import { InMemoryDedupeStore } from "@http-client-toolkit/store-memory";
+import { InMemoryDedupeStore } from '@http-client-toolkit/store-memory';
 
 const dedupe = new InMemoryDedupeStore({
-  jobTimeoutMs: 300_000,     // Default: 5 minutes
+  jobTimeoutMs: 300_000, // Default: 5 minutes
   cleanupIntervalMs: 60_000, // Default: 60s
 });
 ```
@@ -236,13 +253,11 @@ const dedupe = new InMemoryDedupeStore({
 Sliding window rate limiter with optional per-resource configuration.
 
 ```typescript
-import { InMemoryRateLimitStore } from "@http-client-toolkit/store-memory";
+import { InMemoryRateLimitStore } from '@http-client-toolkit/store-memory';
 
 const rateLimit = new InMemoryRateLimitStore({
   defaultConfig: { limit: 60, windowMs: 60_000 },
-  resourceConfigs: new Map([
-    ["slow-api", { limit: 10, windowMs: 60_000 }],
-  ]),
+  resourceConfigs: new Map([['slow-api', { limit: 10, windowMs: 60_000 }]]),
 });
 ```
 
@@ -251,34 +266,34 @@ const rateLimit = new InMemoryRateLimitStore({
 Priority-aware rate limiter that dynamically allocates capacity between user and background requests based on recent activity patterns.
 
 ```typescript
-import { AdaptiveRateLimitStore } from "@http-client-toolkit/store-memory";
+import { AdaptiveRateLimitStore } from '@http-client-toolkit/store-memory';
 
 const rateLimit = new AdaptiveRateLimitStore({
   defaultConfig: { limit: 200, windowMs: 3_600_000 }, // 200 req/hour
-  resourceConfigs: new Map([
-    ["search", { limit: 50, windowMs: 60_000 }],
-  ]),
+  resourceConfigs: new Map([['search', { limit: 50, windowMs: 60_000 }]]),
   adaptiveConfig: {
-    highActivityThreshold: 10,    // User requests to trigger high-activity mode
+    highActivityThreshold: 10, // User requests to trigger high-activity mode
     moderateActivityThreshold: 3, // User requests to trigger moderate mode
-    monitoringWindowMs: 900_000,  // 15-minute activity window
-    maxUserScaling: 2.0,          // Max user capacity multiplier
+    monitoringWindowMs: 900_000, // 15-minute activity window
+    maxUserScaling: 2.0, // Max user capacity multiplier
   },
 });
 ```
 
 **Adaptive strategies:**
 
-| Activity Level | Behavior |
-|----------------|----------|
-| **High** | Prioritizes user requests, pauses background if trend is increasing |
-| **Moderate** | Balanced allocation with trend-aware scaling |
-| **Low** | Scales up background capacity |
-| **Sustained inactivity** | Gives full capacity to background |
+| Activity Level           | Behavior                                                            |
+| ------------------------ | ------------------------------------------------------------------- |
+| **High**                 | Prioritizes user requests, pauses background if trend is increasing |
+| **Moderate**             | Balanced allocation with trend-aware scaling                        |
+| **Low**                  | Scales up background capacity                                       |
+| **Sustained inactivity** | Gives full capacity to background                                   |
 
 ## SQLite Stores
 
 Persistent stores backed by SQLite via [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) and [Drizzle ORM](https://orm.drizzle.team/). Suitable for production use where data should survive process restarts.
+
+By default, stores use `':memory:'` (non-persistent). Pass a file path (for example `./app.db`) for persistence.
 
 ```bash
 npm install @http-client-toolkit/store-sqlite
@@ -287,14 +302,14 @@ npm install @http-client-toolkit/store-sqlite
 All SQLite stores accept either a file path or an existing `better-sqlite3` Database instance. Passing a shared instance lets multiple stores operate on the same database file:
 
 ```typescript
-import Database from "better-sqlite3";
+import Database from 'better-sqlite3';
 import {
   SQLiteCacheStore,
   SQLiteDedupeStore,
   SQLiteRateLimitStore,
-} from "@http-client-toolkit/store-sqlite";
+} from '@http-client-toolkit/store-sqlite';
 
-const db = new Database("./app.db");
+const db = new Database('./app.db');
 
 const cache = new SQLiteCacheStore({ database: db });
 const dedupe = new SQLiteDedupeStore({ database: db });
@@ -309,7 +324,7 @@ When a file path is passed instead, the store manages its own connection and wil
 
 ```typescript
 new SQLiteCacheStore({
-  database: "./cache.db", // Default: ':memory:'
+  database: './cache.db', // Default: ':memory:'
   cleanupIntervalMs: 60_000,
   maxEntrySizeBytes: 5_242_880, // Default: 5 MiB
 });
@@ -319,7 +334,7 @@ new SQLiteCacheStore({
 
 ```typescript
 new SQLiteDedupeStore({
-  database: "./dedupe.db",
+  database: './dedupe.db',
   jobTimeoutMs: 300_000,
   cleanupIntervalMs: 60_000,
 });
@@ -349,15 +364,15 @@ new SqliteAdaptiveRateLimitStore({
 ## Full Example
 
 ```typescript
-import { HttpClient } from "@http-client-toolkit/core";
-import Database from "better-sqlite3";
+import { HttpClient } from '@http-client-toolkit/core';
+import Database from 'better-sqlite3';
 import {
   SQLiteCacheStore,
   SQLiteDedupeStore,
   SqliteAdaptiveRateLimitStore,
-} from "@http-client-toolkit/store-sqlite";
+} from '@http-client-toolkit/store-sqlite';
 
-const db = new Database("./http-store.db");
+const db = new Database('./http-store.db');
 
 const client = new HttpClient(
   {
@@ -378,16 +393,32 @@ const client = new HttpClient(
 
 // User-initiated request
 const user = await client.get<{ name: string }>(
-  "https://api.example.com/user/1",
-  { priority: "user" },
+  'https://api.example.com/user/1',
+  { priority: 'user' },
 );
 
 // Background sync
 const items = await client.get<Array<{ id: number }>>(
-  "https://api.example.com/items",
-  { priority: "background" },
+  'https://api.example.com/items',
+  { priority: 'background' },
 );
 ```
+
+## Development
+
+From the repo root:
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+pnpm lint
+```
+
+Useful root scripts:
+
+- `pnpm format` - format TypeScript/Markdown files with Prettier
+- `pnpm clean` - remove package build outputs and root `node_modules`
 
 ## License
 
