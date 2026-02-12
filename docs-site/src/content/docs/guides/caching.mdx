@@ -5,7 +5,6 @@ description: Configure HTTP response caching with TTL, cache headers, and evicti
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-# Caching
 
 HTTP Client Toolkit provides response caching through the `CacheStore` interface. The client respects standard HTTP cache headers (`Cache-Control`, `ETag`, `Last-Modified`, `Expires`) per RFC 9111 to make smart caching decisions — honoring server-specified freshness, performing lightweight revalidation, and supporting resilience patterns like `stale-while-revalidate`.
 
