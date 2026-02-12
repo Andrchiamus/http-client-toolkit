@@ -111,14 +111,7 @@ export interface HttpClientOptions {
     combined?: Array<string>;
   };
   /**
-   * When true, the client respects HTTP cache headers (Cache-Control, ETag,
-   * Last-Modified, Expires) per RFC 9111. When false (default), caching uses
-   * only the static defaultCacheTTL.
-   */
-  respectCacheHeaders?: boolean;
-  /**
-   * Override specific cache header behaviors. Only applies when
-   * respectCacheHeaders is true.
+   * Override specific cache header behaviors.
    */
   cacheHeaderOverrides?: {
     /** Cache responses even when Cache-Control: no-store is set */
@@ -160,10 +153,7 @@ export class HttpClient implements HttpClientContract {
   private options: Required<
     Pick<
       HttpClientOptions,
-      | 'defaultCacheTTL'
-      | 'throwOnRateLimit'
-      | 'maxWaitTime'
-      | 'respectCacheHeaders'
+      'defaultCacheTTL' | 'throwOnRateLimit' | 'maxWaitTime'
     >
   > &
     Pick<
@@ -182,7 +172,6 @@ export class HttpClient implements HttpClientContract {
       defaultCacheTTL: options.defaultCacheTTL ?? 3600,
       throwOnRateLimit: options.throwOnRateLimit ?? true,
       maxWaitTime: options.maxWaitTime ?? 60000,
-      respectCacheHeaders: options.respectCacheHeaders ?? false,
       responseTransformer: options.responseTransformer,
       errorHandler: options.errorHandler,
       responseHandler: options.responseHandler,
@@ -718,60 +707,48 @@ export class HttpClient implements HttpClientContract {
       if (this.stores.cache) {
         const cachedResult = await this.stores.cache.get(hash);
 
-        if (cachedResult !== undefined) {
-          // RFC 9111 cache header path
-          if (this.options.respectCacheHeaders && isCacheEntry(cachedResult)) {
-            const entry = cachedResult as CacheEntry<unknown>;
-            const status = getFreshnessStatus(entry.metadata);
+        if (cachedResult !== undefined && isCacheEntry(cachedResult)) {
+          const entry = cachedResult as CacheEntry<unknown>;
+          const status = getFreshnessStatus(entry.metadata);
 
-            switch (status) {
-              case 'fresh':
-                return entry.value as Result;
+          switch (status) {
+            case 'fresh':
+              return entry.value as Result;
 
-              case 'no-cache':
-                if (this.options.cacheHeaderOverrides?.ignoreNoCache) {
-                  return entry.value as Result;
-                }
-                staleEntry = entry;
-                break;
-
-              case 'must-revalidate':
-                staleEntry = entry;
-                break;
-
-              case 'stale-while-revalidate': {
-                // Serve stale immediately, revalidate in background
-                const revalidation = this.backgroundRevalidate(
-                  url,
-                  hash,
-                  entry,
-                );
-                this.pendingRevalidations.push(revalidation);
-                // Cleanup resolved promises periodically
-                revalidation.finally(() => {
-                  this.pendingRevalidations = this.pendingRevalidations.filter(
-                    (p) => p !== revalidation,
-                  );
-                });
+            case 'no-cache':
+              if (this.options.cacheHeaderOverrides?.ignoreNoCache) {
                 return entry.value as Result;
               }
+              staleEntry = entry;
+              break;
 
-              case 'stale-if-error':
-                // Attempt fresh fetch, fall back to stale on error
-                staleCandidate = entry;
-                staleEntry = entry; // Also use for conditional request
-                break;
+            case 'must-revalidate':
+              staleEntry = entry;
+              break;
 
-              case 'stale':
-                staleEntry = entry;
-                break;
+            case 'stale-while-revalidate': {
+              // Serve stale immediately, revalidate in background
+              const revalidation = this.backgroundRevalidate(url, hash, entry);
+              this.pendingRevalidations.push(revalidation);
+              // Cleanup resolved promises periodically
+              revalidation.finally(() => {
+                this.pendingRevalidations = this.pendingRevalidations.filter(
+                  (p) => p !== revalidation,
+                );
+              });
+              return entry.value as Result;
             }
-          } else if (!this.options.respectCacheHeaders) {
-            // Original behavior: raw value, no envelope
-            return cachedResult as Result;
+
+            case 'stale-if-error':
+              // Attempt fresh fetch, fall back to stale on error
+              staleCandidate = entry;
+              staleEntry = entry; // Also use for conditional request
+              break;
+
+            case 'stale':
+              staleEntry = entry;
+              break;
           }
-          // else: respectCacheHeaders is on but value is a legacy raw entry.
-          // Treat as cache miss — re-fetch and store in new envelope format.
         }
       }
 
@@ -809,7 +786,7 @@ export class HttpClient implements HttpClientContract {
       // 4. Execute the actual HTTP request
       // Build conditional headers when we have a stale entry
       const fetchInit: RequestInit = { signal };
-      if (this.options.respectCacheHeaders && staleEntry) {
+      if (staleEntry) {
         const conditionalHeaders = new Headers();
         if (staleEntry.metadata.etag) {
           conditionalHeaders.set('If-None-Match', staleEntry.metadata.etag);
@@ -830,11 +807,7 @@ export class HttpClient implements HttpClientContract {
       this.applyServerRateLimitHints(url, response.headers, response.status);
 
       // Handle 304 Not Modified — must be checked BEFORE !response.ok
-      if (
-        this.options.respectCacheHeaders &&
-        response.status === 304 &&
-        staleEntry
-      ) {
+      if (response.status === 304 && staleEntry) {
         const refreshed = refreshCacheEntry(staleEntry, response.headers);
         const ttl = this.clampTTL(
           calculateStoreTTL(refreshed.metadata, this.options.defaultCacheTTL),
@@ -888,30 +861,20 @@ export class HttpClient implements HttpClientContract {
 
       // 8. Cache the result
       if (this.stores.cache) {
-        if (this.options.respectCacheHeaders) {
-          // RFC 9111 cache storage path
-          const cc = parseCacheControl(response.headers.get('cache-control'));
-          const shouldStore =
-            !cc.noStore || this.options.cacheHeaderOverrides?.ignoreNoStore;
+        const cc = parseCacheControl(response.headers.get('cache-control'));
+        const shouldStore =
+          !cc.noStore || this.options.cacheHeaderOverrides?.ignoreNoStore;
 
-          if (shouldStore) {
-            const entry = createCacheEntry(
-              result,
-              response.headers,
-              response.status,
-            );
-            const ttl = this.clampTTL(
-              calculateStoreTTL(entry.metadata, this.options.defaultCacheTTL),
-            );
-            await this.stores.cache.set(hash, entry, ttl);
-          }
-        } else {
-          // Original behavior
-          await this.stores.cache.set(
-            hash,
+        if (shouldStore) {
+          const entry = createCacheEntry(
             result,
-            this.options.defaultCacheTTL,
+            response.headers,
+            response.status,
           );
+          const ttl = this.clampTTL(
+            calculateStoreTTL(entry.metadata, this.options.defaultCacheTTL),
+          );
+          await this.stores.cache.set(hash, entry, ttl);
         }
       }
 
@@ -923,11 +886,7 @@ export class HttpClient implements HttpClientContract {
       return result;
     } catch (error) {
       // stale-if-error fallback: serve stale entry when origin fails
-      if (
-        this.options.respectCacheHeaders &&
-        staleCandidate &&
-        this.isServerErrorOrNetworkFailure(error)
-      ) {
+      if (staleCandidate && this.isServerErrorOrNetworkFailure(error)) {
         const result = staleCandidate.value as Result;
 
         if (this.stores.dedupe) {

@@ -43,9 +43,6 @@ export interface CacheEntry<T = unknown> {
 
 /**
  * Type guard: distinguishes a CacheEntry envelope from a raw cached value.
- *
- * When respectCacheHeaders is enabled on a cache that previously stored raw
- * values, those old entries will fail this check and be treated as cache misses.
  */
 export function isCacheEntry<T>(value: unknown): value is CacheEntry<T> {
   return (

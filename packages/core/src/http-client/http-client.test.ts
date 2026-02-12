@@ -544,9 +544,30 @@ describe('HttpClient', () => {
   });
 
   test('should return cache hit without calling upstream', async () => {
+    const freshEntry: CacheEntry = {
+      __cacheEntry: true,
+      value: { ok: true },
+      metadata: {
+        cacheControl: {
+          noCache: false,
+          noStore: false,
+          mustRevalidate: false,
+          proxyRevalidate: false,
+          public: false,
+          private: false,
+          immutable: false,
+          maxAge: 3600,
+        },
+        responseDate: Date.now(),
+        storedAt: Date.now(),
+        ageHeader: 0,
+        statusCode: 200,
+      },
+    };
+
     const cacheStoreStub = {
       async get() {
-        return { ok: true };
+        return freshEntry;
       },
       async set() {},
       async delete() {},
@@ -1026,7 +1047,7 @@ describe('HttpClient', () => {
 
     test('respects max-age and stores CacheEntry envelope', async () => {
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/data')
@@ -1042,7 +1063,7 @@ describe('HttpClient', () => {
 
     test('returns fresh cached entry without network request', async () => {
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/fresh')
@@ -1058,7 +1079,7 @@ describe('HttpClient', () => {
 
     test('does not cache when no-store is set', async () => {
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/no-store')
@@ -1075,7 +1096,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           cacheHeaderOverrides: { ignoreNoStore: true },
         },
       );
@@ -1096,7 +1116,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/etag-data')
@@ -1125,7 +1145,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl).get('/lm-data').reply(
         200,
@@ -1154,7 +1174,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       // No ETag or Last-Modified
       nock(baseUrl)
@@ -1178,7 +1198,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl).get('/swr').reply(
         200,
@@ -1211,7 +1231,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl).get('/swr-200').reply(
         200,
@@ -1251,7 +1271,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           responseTransformer: (data: unknown) => {
             const obj = data as Record<string, unknown>;
             return { transformed: obj['v'] };
@@ -1293,7 +1312,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           responseHandler: (data: unknown) => {
             const obj = data as Record<string, unknown>;
             return { handled: obj['v'] };
@@ -1331,7 +1349,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl).get('/swr-fail').reply(
         200,
@@ -1360,7 +1378,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/sie')
@@ -1385,7 +1403,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/sie-net')
@@ -1419,7 +1437,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/no-cache')
@@ -1445,7 +1463,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           cacheHeaderOverrides: { ignoreNoCache: true },
         },
       );
@@ -1466,7 +1483,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           cacheHeaderOverrides: { minimumTTL: 300 },
         },
       );
@@ -1487,7 +1503,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           cacheHeaderOverrides: { maximumTTL: 60 },
         },
       );
@@ -1501,44 +1516,6 @@ describe('HttpClient', () => {
       const hash = hashRequest(`${baseUrl}/max-ttl`, {});
       const entry = cache._store.get(hash);
       expect(entry?.ttl).toBe(60);
-    });
-
-    test('preserves original behavior when respectCacheHeaders is false', async () => {
-      const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: false });
-
-      nock(baseUrl)
-        .get('/legacy')
-        .reply(200, { id: 1 }, { 'Cache-Control': 'max-age=60' });
-
-      await client.get(`${baseUrl}/legacy`);
-
-      const hash = hashRequest(`${baseUrl}/legacy`, {});
-      const stored = await cache.get(hash);
-      // Should be raw value, not a CacheEntry envelope
-      expect(isCacheEntry(stored)).toBe(false);
-      expect(stored).toEqual({ id: 1 });
-    });
-
-    test('treats legacy raw cache entries as cache miss when respectCacheHeaders is on', async () => {
-      const cache = makeCacheStore();
-
-      // Pre-seed cache with a raw (non-envelope) value
-      const hash = hashRequest(`${baseUrl}/legacy-miss`, {});
-      await cache.set(hash, { id: 'old' }, 3600);
-
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
-
-      nock(baseUrl)
-        .get('/legacy-miss')
-        .reply(200, { id: 'new' }, { 'Cache-Control': 'max-age=300' });
-
-      const result = await client.get(`${baseUrl}/legacy-miss`);
-      expect(result).toEqual({ id: 'new' });
-
-      // Should now be stored as CacheEntry
-      const stored = await cache.get(hash);
-      expect(isCacheEntry(stored)).toBe(true);
     });
 
     test('304 response completes dedup for waiting callers', async () => {
@@ -1563,10 +1540,7 @@ describe('HttpClient', () => {
       } as const;
 
       const cache = makeCacheStore();
-      const client = new HttpClient(
-        { cache, dedupe: dedupeStub },
-        { respectCacheHeaders: true },
-      );
+      const client = new HttpClient({ cache, dedupe: dedupeStub });
 
       nock(baseUrl)
         .get('/304-dedup')
@@ -1590,7 +1564,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl).get('/must-reval').reply(
         200,
@@ -1619,7 +1593,7 @@ describe('HttpClient', () => {
       vi.spyOn(Date, 'now').mockReturnValue(now);
 
       const cache = makeCacheStore();
-      const client = new HttpClient({ cache }, { respectCacheHeaders: true });
+      const client = new HttpClient({ cache });
 
       nock(baseUrl)
         .get('/sie-4xx')
@@ -1640,12 +1614,11 @@ describe('HttpClient', () => {
       );
     });
 
-    test('applies responseTransformer with respectCacheHeaders', async () => {
+    test('applies responseTransformer to cached responses', async () => {
       const cache = makeCacheStore();
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           responseTransformer: (data: unknown) => {
             const obj = data as Record<string, unknown>;
             return { transformed: obj['raw'] };
@@ -1670,7 +1643,6 @@ describe('HttpClient', () => {
       const client = new HttpClient(
         { cache },
         {
-          respectCacheHeaders: true,
           cacheHeaderOverrides: { minimumTTL: 100, maximumTTL: 200 },
         },
       );
@@ -1696,10 +1668,7 @@ describe('HttpClient', () => {
 
     test('uses defaultCacheTTL when no cache headers present', async () => {
       const cache = makeCacheStore();
-      const client = new HttpClient(
-        { cache },
-        { respectCacheHeaders: true, defaultCacheTTL: 900 },
-      );
+      const client = new HttpClient({ cache }, { defaultCacheTTL: 900 });
 
       nock(baseUrl).get('/no-headers').reply(200, { id: 1 });
 
@@ -1710,7 +1679,7 @@ describe('HttpClient', () => {
     });
 
     test('flushRevalidations resolves when no pending revalidations', async () => {
-      const client = new HttpClient({}, { respectCacheHeaders: true });
+      const client = new HttpClient();
       await expect(client.flushRevalidations()).resolves.toBeUndefined();
     });
 
@@ -1736,10 +1705,7 @@ describe('HttpClient', () => {
       } as const;
 
       const cache = makeCacheStore();
-      const client = new HttpClient(
-        { cache, dedupe: dedupeStub },
-        { respectCacheHeaders: true },
-      );
+      const client = new HttpClient({ cache, dedupe: dedupeStub });
 
       nock(baseUrl)
         .get('/sie-dedup')
