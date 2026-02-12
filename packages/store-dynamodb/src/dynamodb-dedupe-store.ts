@@ -481,6 +481,10 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
   }
 
   async clear(): Promise<void> {
+    if (this.isDestroyed) {
+      throw new Error('Dedupe store has been destroyed');
+    }
+
     await this.readyPromise;
 
     let lastEvaluatedKey: Record<string, unknown> | undefined;
