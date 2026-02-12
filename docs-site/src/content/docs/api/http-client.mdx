@@ -32,6 +32,9 @@ All stores are optional. Pass only the ones you need.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
+| `fetchFn` | `(url: string, init?: RequestInit) => Promise<Response>` | `globalThis.fetch` | Custom fetch implementation |
+| `requestInterceptor` | `(url: string, init: RequestInit) => Promise<RequestInit> \| RequestInit` | — | Pre-request hook to modify the outgoing request |
+| `responseInterceptor` | `(response: Response, url: string) => Promise<Response> \| Response` | — | Post-response hook to inspect/modify the raw Response |
 | `defaultCacheTTL` | `number` | `3600` | Cache TTL in seconds |
 | `throwOnRateLimit` | `boolean` | `true` | Throw when rate limited vs. wait |
 | `maxWaitTime` | `number` | `60000` | Max wait time in ms before throwing |
@@ -70,9 +73,13 @@ When `client.get(url)` is called, the request passes through each configured lay
 1. **Cache** — Return cached response if available
 2. **Dedupe** — If an identical request is already in-flight, wait for its result
 3. **Rate Limit** — Wait or throw if the rate limit is exceeded
-4. **Fetch** — Execute the HTTP request
-5. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
-6. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
+4. **Request Interceptor** — Modify the outgoing request (e.g. inject auth headers)
+5. **Fetch** — Execute the HTTP request via `fetchFn` (or `globalThis.fetch`)
+6. **Response Interceptor** — Inspect or modify the raw `Response`
+7. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
+8. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
+
+See the [Interceptors guide](/http-client-toolkit/guides/interceptors/) for detailed usage.
 
 ## Cache TTL Semantics
 
@@ -167,6 +174,38 @@ const data = await client.get(url, { signal: controller.signal });
 
 // Cancel from elsewhere
 controller.abort();
+```
+
+### With Interceptors
+
+```typescript
+const client = new HttpClient(stores, {
+  requestInterceptor: async (url, init) => {
+    const token = await getAccessToken();
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    return { ...init, headers };
+  },
+  responseInterceptor: (response, url) => {
+    console.log(`${response.status} ${url}`);
+    return response;
+  },
+});
+```
+
+### With Custom Fetch
+
+```typescript
+const client = new HttpClient(stores, {
+  fetchFn: async (url, init) => {
+    const response = await fetch(url, init);
+    // Follow pre-signed URL redirects before caching
+    if (response.headers.has('x-redirect-url')) {
+      return fetch(response.headers.get('x-redirect-url')!, init);
+    }
+    return response;
+  },
+});
 ```
 
 ### With Response Transformation

@@ -33,11 +33,11 @@ The core `HttpClient` orchestrates three pluggable concerns in a pipeline:
   <TabItem label="Request Flow">
     ```
     client.get(url)
-    ┌─────────┐   ┌─────────┐   ┌────────────┐   ┌───────┐
-    │  Cache   │ → │  Dedupe  │ → │ Rate Limit │ → │ Fetch │
-    └─────────┘   └─────────┘   └────────────┘   └───────┘
-         ↑                                             │
-         └─── Transform → Validate → Store result ────┘
+    ┌───────┐   ┌────────┐   ┌────────────┐   ┌─────────────┐   ┌───────┐   ┌──────────────┐
+    │ Cache  │ → │ Dedupe │ → │ Rate Limit │ → │ Req Intercpt│ → │ Fetch │ → │ Res Intercpt │
+    └───────┘   └────────┘   └────────────┘   └─────────────┘   └───────┘   └──────────────┘
+         ↑                                                                          │
+         └───────────── Transform → Validate → Store result ───────────────────────┘
     ```
   </TabItem>
   <TabItem label="Store Backends">
@@ -54,9 +54,11 @@ The core `HttpClient` orchestrates three pluggable concerns in a pipeline:
 1. **Cache** — Return a cached response if available
 2. **Dedupe** — If an identical request is already in-flight, wait for its result instead of making a duplicate call
 3. **Rate Limit** — Wait or throw if the rate limit is exceeded
-4. **Fetch** — Execute the HTTP request
-5. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
-6. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
+4. **Request Interceptor** — Modify the outgoing request (e.g. inject auth headers)
+5. **Fetch** — Execute the HTTP request via `fetchFn` (or `globalThis.fetch`)
+6. **Response Interceptor** — Inspect or modify the raw `Response` before parsing
+7. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
+8. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
 
 Each layer is optional. A cache-only client or a rate-limit-only client works just as well.
 

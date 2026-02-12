@@ -4,16 +4,18 @@ description: Transform and validate API responses with the built-in pipeline
 ---
 
 
-HTTP Client Toolkit provides a two-stage response pipeline: **transform** then **validate**. This lets you normalize API data and enforce response shapes before they reach your application code.
+HTTP Client Toolkit provides a multi-stage response pipeline. After the raw `Response` is received, it passes through an optional **response interceptor**, then the body is parsed and flows through **transform** then **validate** stages. This lets you inspect raw responses, normalize API data, and enforce response shapes before they reach your application code.
 
 ## The Pipeline
 
 After a successful HTTP response, data flows through:
 
-1. **`responseTransformer`** — Normalize raw response data (e.g. convert keys to camelCase)
-2. **`responseHandler`** — Validate or unwrap the transformed data
+1. **`responseInterceptor`** — Inspect or modify the raw `Response` object (headers, status, body stream). See the [Interceptors guide](/http-client-toolkit/guides/interceptors/)
+2. **Parse** — Response body is read and parsed (JSON or text)
+3. **`responseTransformer`** — Normalize parsed response data (e.g. convert keys to camelCase)
+4. **`responseHandler`** — Validate or unwrap the transformed data
 
-Both are optional. If neither is provided, the raw JSON response is returned.
+All stages are optional. If none are provided, the raw parsed JSON response is returned.
 
 ## Response Transformer
 

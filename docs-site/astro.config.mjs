@@ -32,6 +32,7 @@ export default defineConfig({
 						{ label: 'Caching', slug: 'guides/caching' },
 						{ label: 'Deduplication', slug: 'guides/deduplication' },
 						{ label: 'Rate Limiting', slug: 'guides/rate-limiting' },
+						{ label: 'Interceptors', slug: 'guides/interceptors' },
 						{ label: 'Error Handling', slug: 'guides/error-handling' },
 						{
 							label: 'Response Transformation',

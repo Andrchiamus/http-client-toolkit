@@ -1,0 +1,209 @@
+---
+title: Interceptors
+description: Customise the HTTP lifecycle with fetchFn, requestInterceptor, and responseInterceptor
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+HTTP Client Toolkit exposes three hooks that let you customise the HTTP lifecycle without coupling domain-specific concerns (auth, logging, URL resolution) to the core client.
+
+## Execution Order
+
+```
+requestInterceptor(url, init)     ← modify request before sending
+    ↓
+fetchFn(url, modifiedInit)        ← make the HTTP call
+    ↓
+responseInterceptor(response)     ← inspect/modify raw Response
+    ↓
+parse response body               ← existing logic
+    ↓
+responseTransformer(data)         ← transform parsed data
+    ↓
+responseHandler(data)             ← validate/inspect
+    ↓
+cache result                      ← store in cache
+    ↓
+return to caller
+```
+
+All three are optional and compose with existing options like `responseTransformer` and `responseHandler`.
+
+## Request Interceptor
+
+Runs before every outbound request. Use it to inject headers, add tracing context, or modify the request init.
+
+```typescript
+const client = new HttpClient(stores, {
+  requestInterceptor: async (url, init) => {
+    const token = await getAccessToken();
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    return { ...init, headers };
+  },
+});
+```
+
+The interceptor receives the URL and current `RequestInit`, and must return a (possibly modified) `RequestInit`. Both sync and async interceptors are supported.
+
+### Common Use Cases
+
+<Tabs>
+  <TabItem label="Auth Headers">
+    ```typescript
+    requestInterceptor: async (url, init) => {
+      const token = await refreshToken();
+      const headers = new Headers(init.headers);
+      headers.set('Authorization', `Bearer ${token}`);
+      return { ...init, headers };
+    },
+    ```
+  </TabItem>
+  <TabItem label="Correlation ID">
+    ```typescript
+    requestInterceptor: (url, init) => {
+      const headers = new Headers(init.headers);
+      headers.set('X-Correlation-ID', crypto.randomUUID());
+      return { ...init, headers };
+    },
+    ```
+  </TabItem>
+  <TabItem label="API Key">
+    ```typescript
+    requestInterceptor: (url, init) => {
+      const headers = new Headers(init.headers);
+      headers.set('X-API-Key', process.env.API_KEY!);
+      return { ...init, headers };
+    },
+    ```
+  </TabItem>
+</Tabs>
+
+## Response Interceptor
+
+Runs after the raw `Response` is received but **before** body parsing, transformation, and caching. Use it for logging, modifying headers, or replacing the response entirely.
+
+```typescript
+const client = new HttpClient(stores, {
+  responseInterceptor: (response, url) => {
+    console.log(`${response.status} ${url}`);
+    return response;
+  },
+});
+```
+
+The interceptor receives the raw `Response` and the request URL, and must return a `Response` (the same one or a replacement). Both sync and async interceptors are supported.
+
+:::note
+This is distinct from `responseTransformer`, which operates on **parsed** data. `responseInterceptor` operates on the raw `Response` object (headers, status, body stream).
+:::
+
+### Common Use Cases
+
+<Tabs>
+  <TabItem label="Logging">
+    ```typescript
+    responseInterceptor: (response, url) => {
+      const duration = performance.now() - requestStart;
+      logger.info({ url, status: response.status, duration });
+      return response;
+    },
+    ```
+  </TabItem>
+  <TabItem label="Replace Response">
+    ```typescript
+    responseInterceptor: async (response, url) => {
+      // Follow a redirect URL from a custom header
+      const redirect = response.headers.get('x-redirect-url');
+      if (redirect) {
+        return fetch(redirect);
+      }
+      return response;
+    },
+    ```
+  </TabItem>
+</Tabs>
+
+## Custom Fetch Function
+
+Replace `globalThis.fetch` entirely. Use this when you need control over the transport layer — e.g. resolving pre-signed URLs, using an HTTP agent, or instrumenting with OpenTelemetry.
+
+```typescript
+const client = new HttpClient(stores, {
+  fetchFn: async (url, init) => {
+    const response = await fetch(url, init);
+    // Resolve S3 pre-signed URL before the response enters the cache
+    const presignedUrl = response.headers.get('x-presigned-url');
+    if (presignedUrl) {
+      return fetch(presignedUrl);
+    }
+    return response;
+  },
+});
+```
+
+When `fetchFn` is not provided, the client uses `globalThis.fetch`.
+
+## Composing All Three
+
+The hooks compose naturally. Here's a complete example with auth injection, custom fetch, and response logging:
+
+```typescript
+const client = new HttpClient(stores, {
+  // 1. Inject auth before every request
+  requestInterceptor: async (url, init) => {
+    const token = await getAccessToken();
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    return { ...init, headers };
+  },
+
+  // 2. Resolve pre-signed URLs at the fetch layer
+  fetchFn: async (url, init) => {
+    const response = await fetch(url, init);
+    const presignedUrl = response.headers.get('x-presigned-url');
+    if (presignedUrl) {
+      return fetch(presignedUrl);
+    }
+    return response;
+  },
+
+  // 3. Log every response
+  responseInterceptor: (response, url) => {
+    console.log(`[${response.status}] ${url}`);
+    return response;
+  },
+
+  // 4. Transform parsed data (existing option)
+  responseTransformer: (data) =>
+    camelcaseKeys(data as Record<string, unknown>, { deep: true }),
+});
+```
+
+## Interaction with Caching
+
+Interceptors only run when an actual HTTP request is made. Cache hits are returned directly **without** invoking any interceptor or `fetchFn`.
+
+Interceptors **do** run during background revalidation (`stale-while-revalidate`), ensuring that revalidation requests use the same auth tokens, logging, and fetch customisation as regular requests.
+
+## Error Handling
+
+Errors thrown by interceptors propagate through the normal error pipeline. If an `errorHandler` is configured, it will receive the interceptor error. Otherwise, a standard `HttpClientError` is thrown.
+
+```typescript
+const client = new HttpClient(stores, {
+  requestInterceptor: async (url, init) => {
+    const token = await getAccessToken();
+    if (!token) {
+      throw new Error('No access token available');
+    }
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    return { ...init, headers };
+  },
+  errorHandler: (error) => {
+    // Interceptor errors arrive here too
+    return new AppError(error instanceof Error ? error.message : String(error));
+  },
+});
+```
