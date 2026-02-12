@@ -103,3 +103,7 @@ cache.destroy();
 ```
 
 DynamoDB stores don't use timers, so no explicit cleanup is needed.
+
+## HTTP Cache Headers
+
+For smarter caching based on server-provided `Cache-Control`, `ETag`, `Last-Modified`, and `Expires` headers, see the [Cache Headers (RFC 9111)](/http-client-toolkit/guides/cache-headers/) guide.

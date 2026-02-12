@@ -40,6 +40,8 @@ All stores are optional. Pass only the ones you need.
 | `responseHandler` | `(data: unknown) => unknown` | — | Validate/process transformed data |
 | `errorHandler` | `(error: unknown) => Error` | — | Convert errors to domain-specific types |
 | `rateLimitHeaders` | `RateLimitHeaderConfig` | defaults | Configure standard/custom header names |
+| `respectCacheHeaders` | `boolean` | `false` | Respect HTTP cache headers (RFC 9111) |
+| `cacheHeaderOverrides` | `CacheHeaderOverrides` | — | Override specific cache header behaviors |
 
 ## Methods
 
@@ -107,6 +109,27 @@ const client = new HttpClient(stores, {
     reset: ['Window-Reset-Seconds'],
   },
 });
+```
+
+## Cache Header Support
+
+When `respectCacheHeaders: true`, the client respects `Cache-Control`, `ETag`, `Last-Modified`, and `Expires` headers per RFC 9111. See the [Cache Headers guide](/http-client-toolkit/guides/cache-headers/) for details.
+
+### `cacheHeaderOverrides`
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `ignoreNoStore` | `boolean` | Cache responses even when `no-store` is set |
+| `ignoreNoCache` | `boolean` | Skip revalidation even when `no-cache` is set |
+| `minimumTTL` | `number` | Floor on header-derived freshness (seconds) |
+| `maximumTTL` | `number` | Cap on header-derived freshness (seconds) |
+
+### `flushRevalidations()`
+
+Waits for all pending `stale-while-revalidate` background fetches to complete. Useful in tests.
+
+```typescript
+await client.flushRevalidations();
 ```
 
 ## Examples

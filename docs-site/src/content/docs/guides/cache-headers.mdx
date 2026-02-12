@@ -1,0 +1,133 @@
+---
+title: Cache Headers (RFC 9111)
+description: Opt-in HTTP cache header support for Cache-Control, ETag, Last-Modified, and Expires
+---
+
+# Cache Headers (RFC 9111)
+
+By default, HttpClient uses a static `defaultCacheTTL` for all cached responses. When `respectCacheHeaders` is enabled, the client respects standard HTTP cache headers to make smarter caching decisions — honoring server-specified freshness, performing lightweight revalidation, and supporting resilience patterns like `stale-while-revalidate`.
+
+:::note
+This is an opt-in feature. All new options default to off and existing behavior is preserved. Store backends are unchanged — the client wraps cached values in a metadata envelope that stores see as a slightly larger JSON object.
+:::
+
+## Enabling Cache Headers
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import { InMemoryCacheStore } from '@http-client-toolkit/store-memory';
+
+const client = new HttpClient(
+  { cache: new InMemoryCacheStore() },
+  { respectCacheHeaders: true },
+);
+```
+
+## What Changes
+
+| Behavior | `respectCacheHeaders: false` (default) | `respectCacheHeaders: true` |
+|----------|---------------------------------------|----------------------------|
+| Cache TTL | Static `defaultCacheTTL` for all responses | Derived from `Cache-Control` / `Expires` headers |
+| `no-store` | Ignored — response is cached | Response is not cached |
+| `no-cache` | Ignored — cached value returned directly | Cached value is revalidated before use |
+| Stale entries | Full re-fetch | Conditional request with `If-None-Match` / `If-Modified-Since` |
+| `stale-while-revalidate` | Not supported | Stale value served immediately, background refresh |
+| `stale-if-error` | Not supported | Stale value served on 5xx / network failure |
+
+## Freshness
+
+The client determines cache freshness following RFC 9111 priority:
+
+1. `Cache-Control: max-age=N` — freshness lifetime is N seconds
+2. `Expires` header minus `Date` header
+3. Heuristic: 10% of (`Date` minus `Last-Modified`)
+4. No freshness info — falls back to `defaultCacheTTL`
+
+```
+Server: Cache-Control: max-age=300
+→ Entry is fresh for 5 minutes, then stale
+```
+
+## Conditional Requests (304 Revalidation)
+
+When a cached entry becomes stale, the client sends conditional headers to the origin server:
+
+- **`If-None-Match`** — sent when the cached response had an `ETag`
+- **`If-Modified-Since`** — sent when the cached response had a `Last-Modified`
+
+If the server responds with `304 Not Modified`, the cached value is refreshed with updated metadata — no body is transferred.
+
+```
+Client → Server: GET /data  If-None-Match: "abc123"
+Server → Client: 304 Not Modified  Cache-Control: max-age=300
+→ Cached value reused, freshness reset to 5 minutes
+```
+
+## Stale-While-Revalidate
+
+When a response includes `stale-while-revalidate`, the client serves the stale cached value immediately and refreshes the cache in the background:
+
+```typescript
+// Server sends: Cache-Control: max-age=60, stale-while-revalidate=120
+// After 60s: entry is stale
+// Between 60s–180s: stale value served instantly, background fetch updates cache
+// After 180s: full re-fetch required
+```
+
+This gives users instant responses while keeping the cache fresh. Background revalidation failures are silently ignored — the stale entry remains until it falls out of the window.
+
+In tests, use `client.flushRevalidations()` to wait for all background revalidations to complete before making assertions.
+
+## Stale-If-Error
+
+When a response includes `stale-if-error`, the client serves a stale cached value if the origin server returns a 5xx error or the network fails:
+
+```typescript
+// Server sends: Cache-Control: max-age=60, stale-if-error=300
+// After 60s: entry is stale
+// If origin returns 500/503 or network fails within 300s of going stale:
+//   → stale value returned instead of throwing
+// After 360s: stale-if-error window expires, errors propagate normally
+```
+
+Only server errors (5xx) and network failures trigger the fallback. Client errors (4xx) are always propagated.
+
+## Overrides
+
+The `cacheHeaderOverrides` option lets you selectively bypass certain cache directives:
+
+```typescript
+const client = new HttpClient(
+  { cache: new InMemoryCacheStore() },
+  {
+    respectCacheHeaders: true,
+    cacheHeaderOverrides: {
+      ignoreNoStore: true,   // Cache even when no-store is set
+      ignoreNoCache: true,   // Skip revalidation even when no-cache is set
+      minimumTTL: 60,        // Floor: cache for at least 60 seconds
+      maximumTTL: 3600,      // Cap: cache for at most 1 hour
+    },
+  },
+);
+```
+
+| Override | Effect |
+|----------|--------|
+| `ignoreNoStore` | Caches responses that have `Cache-Control: no-store` |
+| `ignoreNoCache` | Returns cached values without revalidation even when `no-cache` is set |
+| `minimumTTL` | Floor on the header-derived store TTL (seconds) |
+| `maximumTTL` | Cap on the header-derived store TTL (seconds) |
+
+## Private Cache Semantics
+
+HttpClient operates as a **private cache** (a client library, not a shared proxy), so:
+
+- `Cache-Control: private` responses are cacheable (we are the private cache)
+- `s-maxage` is parsed but ignored for freshness calculations
+- `proxy-revalidate` is parsed but ignored
+
+## Backward Compatibility
+
+- Existing caches with raw (non-envelope) values are treated as cache misses when `respectCacheHeaders` is enabled — they are re-fetched and stored in the new format
+- When `respectCacheHeaders` is `false` (default), behavior is identical to previous versions
+- Store backends require no changes — the metadata envelope is transparent to them

@@ -30,6 +30,7 @@ export default defineConfig({
 					label: 'Guides',
 					items: [
 						{ label: 'Caching', slug: 'guides/caching' },
+						{ label: 'Cache Headers (RFC 9111)', slug: 'guides/cache-headers' },
 						{ label: 'Deduplication', slug: 'guides/deduplication' },
 						{ label: 'Rate Limiting', slug: 'guides/rate-limiting' },
 						{ label: 'Error Handling', slug: 'guides/error-handling' },
