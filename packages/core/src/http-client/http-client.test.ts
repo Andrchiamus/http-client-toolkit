@@ -744,7 +744,7 @@ describe('HttpClient', () => {
         resource: string,
         priority: 'user' | 'background',
         signal?: AbortSignal,
-      ) => Promise<void>;
+      ) => Promise<boolean>;
     };
 
     const scope = privateClient.getOriginScope(baseUrl);
@@ -755,7 +755,7 @@ describe('HttpClient', () => {
 
     await expect(
       privateClient.enforceStoreRateLimit('items', 'background'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
   });
 
   test('should support non-aborted signals during rate-limit wait', async () => {
@@ -819,12 +819,12 @@ describe('HttpClient', () => {
       enforceStoreRateLimit: (
         resource: string,
         priority: 'user' | 'background',
-      ) => Promise<void>;
+      ) => Promise<boolean>;
     };
 
     await expect(
       strictPrivate.enforceStoreRateLimit('items', 'user'),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     const waitingClient = new HttpClient(
       {},

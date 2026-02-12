@@ -45,6 +45,13 @@ export type AdaptiveConfig = z.infer<typeof AdaptiveConfigSchema>;
  */
 export interface RateLimitStore {
   /**
+   * Atomically acquire capacity for a request if the implementation supports it.
+   * When present and returning true, callers should treat the request as already
+   * recorded for rate-limit accounting.
+   */
+  acquire?(resource: string): Promise<boolean>;
+
+  /**
    * Check if a request to a resource can proceed based on rate limits
    * @param resource The resource name (e.g., 'issues', 'characters')
    * @returns True if the request can proceed, false if rate limited
@@ -86,6 +93,11 @@ export interface RateLimitStore {
  * Enhanced interface for adaptive rate limiting stores with priority support
  */
 export interface AdaptiveRateLimitStore extends RateLimitStore {
+  /**
+   * Atomically acquire capacity for a request if the implementation supports it.
+   */
+  acquire?(resource: string, priority?: RequestPriority): Promise<boolean>;
+
   /**
    * Check if a request to a resource can proceed based on rate limits
    * @param resource The resource name (e.g., 'issues', 'characters')

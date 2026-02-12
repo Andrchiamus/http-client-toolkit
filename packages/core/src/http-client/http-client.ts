@@ -434,25 +434,33 @@ export class HttpClient implements HttpClientContract {
     resource: string,
     priority: RequestPriority,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const rateLimit = this.stores.rateLimit as AdaptiveRateLimitStore;
     const startedAt = Date.now();
+    const hasAtomicAcquire = typeof rateLimit.acquire === 'function';
+
+    const canProceedNow = async (): Promise<boolean> => {
+      if (hasAtomicAcquire) {
+        return rateLimit.acquire!(resource, priority);
+      }
+      return rateLimit.canProceed(resource, priority);
+    };
 
     if (this.options.throwOnRateLimit) {
-      const canProceed = await rateLimit.canProceed(resource, priority);
+      const canProceed = await canProceedNow();
       if (!canProceed) {
         const waitTime = await rateLimit.getWaitTime(resource, priority);
         throw new Error(
           `Rate limit exceeded for resource '${resource}'. Wait ${waitTime}ms before retrying.`,
         );
       }
-      return;
+      return hasAtomicAcquire;
     }
 
     // Keep polling + waiting until the store explicitly allows the request or
     // we exhaust maxWaitTime. A single one-off sleep can otherwise let a request
     // through while still over limit.
-    while (!(await rateLimit.canProceed(resource, priority))) {
+    while (!(await canProceedNow())) {
       const suggestedWaitMs = await rateLimit.getWaitTime(resource, priority);
       const elapsedMs = Date.now() - startedAt;
       const remainingWaitBudgetMs = this.options.maxWaitTime - elapsedMs;
@@ -472,6 +480,8 @@ export class HttpClient implements HttpClientContract {
 
       await wait(waitTime, signal);
     }
+
+    return hasAtomicAcquire;
   }
 
   private generateClientError(err: unknown): Error {
@@ -534,8 +544,13 @@ export class HttpClient implements HttpClientContract {
       }
 
       // 3. Rate limiting - check if request can proceed
+      let alreadyRecordedRateLimit = false;
       if (this.stores.rateLimit) {
-        await this.enforceStoreRateLimit(resource, priority, signal);
+        alreadyRecordedRateLimit = await this.enforceStoreRateLimit(
+          resource,
+          priority,
+          signal,
+        );
       }
 
       // 4. Execute the actual HTTP request
@@ -560,7 +575,7 @@ export class HttpClient implements HttpClientContract {
       const result = data as Result;
 
       // 7. Record the request for rate limiting
-      if (this.stores.rateLimit) {
+      if (this.stores.rateLimit && !alreadyRecordedRateLimit) {
         const rateLimit = this.stores.rateLimit as AdaptiveRateLimitStore;
         await rateLimit.record(resource, priority);
       }
