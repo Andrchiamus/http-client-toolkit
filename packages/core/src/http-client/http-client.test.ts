@@ -1913,4 +1913,547 @@ describe('HttpClient', () => {
       expect(result2).toEqual({ v: 2 });
     });
   });
+
+  describe('fetchFn', () => {
+    test('uses custom fetchFn instead of globalThis.fetch', async () => {
+      const mockResponse = new Response(JSON.stringify({ custom: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const customFetch = vi.fn().mockResolvedValue(mockResponse);
+      const client = new HttpClient({}, { fetchFn: customFetch });
+
+      const result = await client.get<{ custom: boolean }>(
+        `${baseUrl}/custom-fetch`,
+      );
+
+      expect(result).toEqual({ custom: true });
+      expect(customFetch).toHaveBeenCalledWith(
+        `${baseUrl}/custom-fetch`,
+        expect.objectContaining({}),
+      );
+    });
+
+    test('falls back to globalThis.fetch when fetchFn is not provided', async () => {
+      nock(baseUrl).get('/default-fetch').reply(200, { default: true });
+
+      const client = new HttpClient();
+      const result = await client.get<{ default: boolean }>(
+        `${baseUrl}/default-fetch`,
+      );
+
+      expect(result).toEqual({ default: true });
+    });
+
+    test('fetchFn receives correct URL and init', async () => {
+      let capturedUrl: string | undefined;
+      let capturedInit: RequestInit | undefined;
+
+      const customFetch = vi
+        .fn()
+        .mockImplementation((url: string, init?: RequestInit) => {
+          capturedUrl = url;
+          capturedInit = init;
+          return Promise.resolve(
+            new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          );
+        });
+
+      const client = new HttpClient({}, { fetchFn: customFetch });
+      await client.get(`${baseUrl}/check-args`, {
+        headers: { 'x-test': 'value' },
+      });
+
+      expect(capturedUrl).toBe(`${baseUrl}/check-args`);
+      expect(new Headers(capturedInit?.headers).get('x-test')).toBe('value');
+    });
+
+    test('fetchFn errors propagate correctly', async () => {
+      const customFetch = vi
+        .fn()
+        .mockRejectedValue(new Error('Custom fetch failed'));
+
+      const client = new HttpClient({}, { fetchFn: customFetch });
+
+      await expect(client.get(`${baseUrl}/fetch-error`)).rejects.toThrow(
+        'Custom fetch failed',
+      );
+    });
+  });
+
+  describe('requestInterceptor', () => {
+    test('interceptor can add headers', async () => {
+      nock(baseUrl)
+        .get('/intercepted')
+        .matchHeader('Authorization', 'Bearer token123')
+        .reply(200, { authed: true });
+
+      const client = new HttpClient(
+        {},
+        {
+          requestInterceptor: (_url, init) => {
+            const headers = new Headers(init.headers);
+            headers.set('Authorization', 'Bearer token123');
+            return { ...init, headers };
+          },
+        },
+      );
+
+      const result = await client.get<{ authed: boolean }>(
+        `${baseUrl}/intercepted`,
+      );
+      expect(result).toEqual({ authed: true });
+    });
+
+    test('interceptor can modify existing init properties', async () => {
+      let capturedInit: RequestInit | undefined;
+
+      const customFetch = vi
+        .fn()
+        .mockImplementation((_url: string, init?: RequestInit) => {
+          capturedInit = init;
+          return Promise.resolve(
+            new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          );
+        });
+
+      const client = new HttpClient(
+        {},
+        {
+          fetchFn: customFetch,
+          requestInterceptor: (_url, init) => ({
+            ...init,
+            cache: 'no-store' as RequestCache,
+          }),
+        },
+      );
+
+      await client.get(`${baseUrl}/modified-init`);
+      expect(capturedInit?.cache).toBe('no-store');
+    });
+
+    test('async interceptor is awaited', async () => {
+      nock(baseUrl)
+        .get('/async-intercepted')
+        .matchHeader('X-Async', 'resolved')
+        .reply(200, { ok: true });
+
+      const client = new HttpClient(
+        {},
+        {
+          requestInterceptor: async (_url, init) => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            const headers = new Headers(init.headers);
+            headers.set('X-Async', 'resolved');
+            return { ...init, headers };
+          },
+        },
+      );
+
+      const result = await client.get<{ ok: boolean }>(
+        `${baseUrl}/async-intercepted`,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    test('no interceptor does not affect default path', async () => {
+      nock(baseUrl).get('/no-interceptor').reply(200, { ok: true });
+
+      const client = new HttpClient();
+      const result = await client.get<{ ok: boolean }>(
+        `${baseUrl}/no-interceptor`,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    test('interceptor errors propagate correctly', async () => {
+      const client = new HttpClient(
+        {},
+        {
+          requestInterceptor: () => {
+            throw new Error('Interceptor failed');
+          },
+        },
+      );
+
+      await expect(client.get(`${baseUrl}/interceptor-error`)).rejects.toThrow(
+        'Interceptor failed',
+      );
+    });
+  });
+
+  describe('responseInterceptor', () => {
+    test('interceptor receives the raw Response and URL', async () => {
+      let capturedUrl: string | undefined;
+      let capturedStatus: number | undefined;
+
+      nock(baseUrl).get('/response-intercepted').reply(200, { v: 1 });
+
+      const client = new HttpClient(
+        {},
+        {
+          responseInterceptor: (response, url) => {
+            capturedUrl = url;
+            capturedStatus = response.status;
+            return response;
+          },
+        },
+      );
+
+      await client.get(`${baseUrl}/response-intercepted`);
+      expect(capturedUrl).toBe(`${baseUrl}/response-intercepted`);
+      expect(capturedStatus).toBe(200);
+    });
+
+    test('interceptor can replace the Response', async () => {
+      nock(baseUrl).get('/replace-response').reply(200, { original: true });
+
+      const client = new HttpClient(
+        {},
+        {
+          responseInterceptor: () => {
+            return new Response(JSON.stringify({ replaced: true }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          },
+        },
+      );
+
+      const result = await client.get<{ replaced: boolean }>(
+        `${baseUrl}/replace-response`,
+      );
+      expect(result).toEqual({ replaced: true });
+    });
+
+    test('async interceptor is awaited', async () => {
+      nock(baseUrl).get('/async-response').reply(200, { v: 1 });
+
+      const client = new HttpClient(
+        {},
+        {
+          responseInterceptor: async (response) => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            return response;
+          },
+        },
+      );
+
+      const result = await client.get<{ v: number }>(
+        `${baseUrl}/async-response`,
+      );
+      expect(result).toEqual({ v: 1 });
+    });
+
+    test('no interceptor does not affect default path', async () => {
+      nock(baseUrl).get('/no-response-interceptor').reply(200, { ok: true });
+
+      const client = new HttpClient();
+      const result = await client.get<{ ok: boolean }>(
+        `${baseUrl}/no-response-interceptor`,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    test('interceptor errors propagate correctly', async () => {
+      nock(baseUrl).get('/response-interceptor-error').reply(200, { ok: true });
+
+      const client = new HttpClient(
+        {},
+        {
+          responseInterceptor: () => {
+            throw new Error('Response interceptor failed');
+          },
+        },
+      );
+
+      await expect(
+        client.get(`${baseUrl}/response-interceptor-error`),
+      ).rejects.toThrow('Response interceptor failed');
+    });
+
+    test('interceptor runs before responseTransformer', async () => {
+      const callOrder: Array<string> = [];
+
+      nock(baseUrl).get('/order-check').reply(200, { v: 1 });
+
+      const client = new HttpClient(
+        {},
+        {
+          responseInterceptor: (response) => {
+            callOrder.push('responseInterceptor');
+            return response;
+          },
+          responseTransformer: (data) => {
+            callOrder.push('responseTransformer');
+            return data;
+          },
+        },
+      );
+
+      await client.get(`${baseUrl}/order-check`);
+      expect(callOrder).toEqual(['responseInterceptor', 'responseTransformer']);
+    });
+  });
+
+  describe('interceptor integration', () => {
+    test('requestInterceptor + responseInterceptor work together', async () => {
+      nock(baseUrl)
+        .get('/both-interceptors')
+        .matchHeader('X-Request', 'added')
+        .reply(200, { v: 1 });
+
+      let responseIntercepted = false;
+
+      const client = new HttpClient(
+        {},
+        {
+          requestInterceptor: (_url, init) => {
+            const headers = new Headers(init.headers);
+            headers.set('X-Request', 'added');
+            return { ...init, headers };
+          },
+          responseInterceptor: (response) => {
+            responseIntercepted = true;
+            return response;
+          },
+        },
+      );
+
+      const result = await client.get<{ v: number }>(
+        `${baseUrl}/both-interceptors`,
+      );
+      expect(result).toEqual({ v: 1 });
+      expect(responseIntercepted).toBe(true);
+    });
+
+    test('fetchFn + interceptors compose correctly', async () => {
+      const callOrder: Array<string> = [];
+
+      const customFetch = vi
+        .fn()
+        .mockImplementation((_url: string, _init?: RequestInit) => {
+          callOrder.push('fetchFn');
+          return Promise.resolve(
+            new Response(JSON.stringify({ v: 1 }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          );
+        });
+
+      const client = new HttpClient(
+        {},
+        {
+          fetchFn: customFetch,
+          requestInterceptor: (_url, init) => {
+            callOrder.push('requestInterceptor');
+            return init;
+          },
+          responseInterceptor: (response) => {
+            callOrder.push('responseInterceptor');
+            return response;
+          },
+        },
+      );
+
+      await client.get(`${baseUrl}/composed`);
+      expect(callOrder).toEqual([
+        'requestInterceptor',
+        'fetchFn',
+        'responseInterceptor',
+      ]);
+    });
+
+    test('cached responses skip fetch and interceptors', async () => {
+      const freshEntry: CacheEntry = {
+        __cacheEntry: true,
+        value: { cached: true },
+        metadata: {
+          cacheControl: {
+            noCache: false,
+            noStore: false,
+            mustRevalidate: false,
+            proxyRevalidate: false,
+            public: false,
+            private: false,
+            immutable: false,
+            maxAge: 3600,
+          },
+          responseDate: Date.now(),
+          storedAt: Date.now(),
+          ageHeader: 0,
+          statusCode: 200,
+        },
+      };
+
+      const cacheStoreStub = {
+        async get() {
+          return freshEntry;
+        },
+        async set() {},
+        async delete() {},
+        async clear() {},
+      } as const;
+
+      const fetchFn = vi.fn();
+      const requestInterceptor = vi.fn();
+      const responseInterceptor = vi.fn();
+
+      const client = new HttpClient(
+        { cache: cacheStoreStub },
+        { fetchFn, requestInterceptor, responseInterceptor },
+      );
+
+      const result = await client.get<{ cached: boolean }>(
+        `${baseUrl}/cached-skip`,
+      );
+      expect(result).toEqual({ cached: true });
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect(requestInterceptor).not.toHaveBeenCalled();
+      expect(responseInterceptor).not.toHaveBeenCalled();
+    });
+
+    test('interceptors apply during background revalidation', async () => {
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+
+      const callOrder: Array<string> = [];
+
+      function makeCacheStore() {
+        const store = new Map<string, { value: unknown; ttl: number }>();
+        return {
+          async get(hash: string) {
+            return store.get(hash)?.value;
+          },
+          async set(hash: string, value: unknown, ttl: number) {
+            store.set(hash, { value, ttl });
+          },
+          async delete(hash: string) {
+            store.delete(hash);
+          },
+          async clear() {
+            store.clear();
+          },
+        };
+      }
+
+      const cache = makeCacheStore();
+      const client = new HttpClient(
+        { cache },
+        {
+          requestInterceptor: (_url, init) => {
+            callOrder.push('requestInterceptor');
+            return init;
+          },
+          responseInterceptor: (response) => {
+            callOrder.push('responseInterceptor');
+            return response;
+          },
+        },
+      );
+
+      nock(baseUrl).get('/swr-interceptors').reply(
+        200,
+        { v: 1 },
+        {
+          'Cache-Control': 'max-age=1, stale-while-revalidate=120',
+          ETag: '"i1"',
+        },
+      );
+
+      await client.get(`${baseUrl}/swr-interceptors`);
+      callOrder.length = 0; // Reset after initial fetch
+
+      vi.spyOn(Date, 'now').mockReturnValue(now + 5000);
+
+      nock(baseUrl)
+        .get('/swr-interceptors')
+        .reply(200, { v: 2 }, { 'Cache-Control': 'max-age=60', ETag: '"i2"' });
+
+      await client.get(`${baseUrl}/swr-interceptors`);
+      await client.flushRevalidations();
+
+      expect(callOrder).toEqual(['requestInterceptor', 'responseInterceptor']);
+    });
+
+    test('fetchFn is used during background revalidation', async () => {
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+
+      let bgFetchCalled = false;
+
+      function makeCacheStore() {
+        const store = new Map<string, { value: unknown; ttl: number }>();
+        return {
+          async get(hash: string) {
+            return store.get(hash)?.value;
+          },
+          async set(hash: string, value: unknown, ttl: number) {
+            store.set(hash, { value, ttl });
+          },
+          async delete(hash: string) {
+            store.delete(hash);
+          },
+          async clear() {
+            store.clear();
+          },
+        };
+      }
+
+      const cache = makeCacheStore();
+
+      // Use a real nock for the initial request, then a custom fetchFn for bg revalidation
+      let fetchCallCount = 0;
+      const originalFetch = globalThis.fetch;
+
+      const customFetch = vi
+        .fn()
+        .mockImplementation((url: string, init?: RequestInit) => {
+          fetchCallCount += 1;
+          if (fetchCallCount === 1) {
+            // First call: use real fetch (nock will intercept)
+            return originalFetch(url, init);
+          }
+          // Second call: background revalidation
+          bgFetchCalled = true;
+          return Promise.resolve(
+            new Response(JSON.stringify({ v: 2 }), {
+              status: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'max-age=60',
+              },
+            }),
+          );
+        });
+
+      const client = new HttpClient({ cache }, { fetchFn: customFetch });
+
+      nock(baseUrl).get('/swr-fetchfn').reply(
+        200,
+        { v: 1 },
+        {
+          'Cache-Control': 'max-age=1, stale-while-revalidate=120',
+          ETag: '"f1"',
+        },
+      );
+
+      await client.get(`${baseUrl}/swr-fetchfn`);
+
+      vi.spyOn(Date, 'now').mockReturnValue(now + 5000);
+
+      await client.get(`${baseUrl}/swr-fetchfn`);
+      await client.flushRevalidations();
+
+      expect(bgFetchCalled).toBe(true);
+    });
+  });
 });
