@@ -213,10 +213,9 @@ describe('DynamoDBDedupeStore', () => {
       expect(r2).toBe('shared-result');
     });
 
-    it('should return undefined when initial get query throws', async () => {
+    it('should propagate errors when initial get query throws', async () => {
       ddbMock.on(GetCommand).rejectsOnce(new Error('db error'));
-      const result = await store.waitFor('fail-hash');
-      expect(result).toBeUndefined();
+      await expect(store.waitFor('fail-hash')).rejects.toThrow('db error');
     });
 
     it('should settle on poll failure', async () => {

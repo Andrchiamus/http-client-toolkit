@@ -84,7 +84,7 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
       item = result.Item as Record<string, unknown> | undefined;
     } catch (error: unknown) {
       throwIfDynamoTableMissing(error, this.tableName);
-      return undefined;
+      throw error;
     }
 
     if (!item) {
