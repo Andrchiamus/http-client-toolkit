@@ -609,9 +609,11 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
 
   private getDefaultCapacity(resource: string): DynamicCapacityResult {
     const limit = this.getResourceLimit(resource);
+    const userReserved = Math.floor(limit * 0.3);
+    const backgroundMax = Math.max(0, limit - userReserved);
     return {
-      userReserved: Math.floor(limit * 0.3),
-      backgroundMax: Math.floor(limit * 0.7),
+      userReserved,
+      backgroundMax,
       backgroundPaused: false,
       reason: 'Default capacity allocation',
     };

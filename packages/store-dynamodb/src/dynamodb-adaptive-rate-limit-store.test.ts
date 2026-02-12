@@ -423,6 +423,21 @@ describe('DynamoDBAdaptiveRateLimitStore', () => {
 
       expect(result.reason).toContain('Default capacity allocation');
     });
+
+    it('should preserve full capacity for tiny limits in default fallback', () => {
+      store.setResourceConfig('tiny-limit', { limit: 1, windowMs: 1000 });
+
+      const privateStore = store as unknown as {
+        getDefaultCapacity: (resource: string) => {
+          userReserved: number;
+          backgroundMax: number;
+        };
+      };
+
+      const result = privateStore.getDefaultCapacity('tiny-limit');
+      expect(result.userReserved + result.backgroundMax).toBe(1);
+      expect(result.backgroundMax).toBe(1);
+    });
   });
 
   describe('client management', () => {
