@@ -1,0 +1,107 @@
+---
+title: Error Handling
+description: Handle HTTP errors and customize error types
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Error Handling
+
+All HTTP errors from `HttpClient` are wrapped in `HttpClientError`, a custom error class that includes the HTTP status code when applicable.
+
+## Basic Error Handling
+
+```typescript
+import { HttpClient, HttpClientError } from '@http-client-toolkit/core';
+
+const client = new HttpClient({ cache: new InMemoryCacheStore() });
+
+try {
+  const data = await client.get('https://api.example.com/user/1');
+} catch (error) {
+  if (error instanceof HttpClientError) {
+    console.log(error.message);    // Error description
+    console.log(error.statusCode); // HTTP status code (e.g. 404, 500)
+  }
+}
+```
+
+## Custom Error Handler
+
+Use `errorHandler` to convert errors into your own domain types:
+
+```typescript
+class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
+class ApiError extends Error {
+  constructor(
+    message: string,
+    public statusCode?: number,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+const client = new HttpClient(stores, {
+  errorHandler: (error) => {
+    if (error instanceof HttpClientError) {
+      if (error.statusCode === 404) {
+        return new NotFoundError('Resource not found');
+      }
+      return new ApiError(error.message, error.statusCode);
+    }
+    return error instanceof Error ? error : new Error(String(error));
+  },
+});
+```
+
+## Rate Limit Errors
+
+When `throwOnRateLimit` is `true` (default), rate limit violations throw `HttpClientError`:
+
+```typescript
+try {
+  await client.get(url);
+} catch (error) {
+  if (error instanceof HttpClientError) {
+    // Could be a rate limit error or a server 429
+    console.log(error.message);
+  }
+}
+```
+
+Set `throwOnRateLimit: false` to wait instead of throwing:
+
+```typescript
+const client = new HttpClient(stores, {
+  throwOnRateLimit: false,
+  maxWaitTime: 30_000, // Wait up to 30 seconds
+});
+```
+
+## Cancellation Errors
+
+When a request is cancelled via `AbortSignal`, the error mimics a browser `AbortError`:
+
+```typescript
+const controller = new AbortController();
+
+try {
+  const promise = client.get(url, { signal: controller.signal });
+  controller.abort();
+  await promise;
+} catch (error) {
+  // error.name === 'AbortError'
+  console.log('Request cancelled');
+}
+```
+
+## Dedupe Failure Behavior
+
+When using deduplication, if the owner request fails, non-owner waiters receive `undefined` rather than a thrown error. This prevents cascading failures across deduplicated callers.

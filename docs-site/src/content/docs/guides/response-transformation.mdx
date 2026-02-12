@@ -1,0 +1,90 @@
+---
+title: Response Transformation
+description: Transform and validate API responses with the built-in pipeline
+---
+
+# Response Transformation
+
+HTTP Client Toolkit provides a two-stage response pipeline: **transform** then **validate**. This lets you normalize API data and enforce response shapes before they reach your application code.
+
+## The Pipeline
+
+After a successful HTTP response, data flows through:
+
+1. **`responseTransformer`** — Normalize raw response data (e.g. convert keys to camelCase)
+2. **`responseHandler`** — Validate or unwrap the transformed data
+
+Both are optional. If neither is provided, the raw JSON response is returned.
+
+## Response Transformer
+
+Use `responseTransformer` to normalize API data before it reaches your application:
+
+```typescript
+import camelcaseKeys from 'camelcase-keys';
+
+const client = new HttpClient(stores, {
+  responseTransformer: (data) => camelcaseKeys(data as Record<string, unknown>, { deep: true }),
+});
+
+// API returns: { "user_name": "Alice", "created_at": "2024-01-01" }
+// You receive: { userName: "Alice", createdAt: "2024-01-01" }
+```
+
+## Response Handler
+
+Use `responseHandler` to validate the shape of the response, unwrap nested data, or throw on unexpected formats:
+
+```typescript
+const client = new HttpClient(stores, {
+  responseHandler: (data) => {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Unexpected response shape');
+    }
+    return data;
+  },
+});
+```
+
+### Combining Both
+
+```typescript
+import camelcaseKeys from 'camelcase-keys';
+import { z } from 'zod';
+
+const client = new HttpClient(stores, {
+  // First: normalize keys
+  responseTransformer: (data) =>
+    camelcaseKeys(data as Record<string, unknown>, { deep: true }),
+
+  // Then: validate shape
+  responseHandler: (data) => {
+    const schema = z.object({
+      userName: z.string(),
+      createdAt: z.string(),
+    });
+    return schema.parse(data);
+  },
+});
+```
+
+## Caching Transformed Data
+
+The response pipeline runs **before** the result is cached. This means cached entries already contain the transformed and validated data — subsequent cache hits return the same processed result without re-running the pipeline.
+
+## Error Handler
+
+Use `errorHandler` to convert errors from the pipeline (or from the HTTP request itself) into domain-specific types:
+
+```typescript
+const client = new HttpClient(stores, {
+  responseTransformer: (data) => transform(data),
+  responseHandler: (data) => validate(data),
+  errorHandler: (error) => {
+    if (error instanceof z.ZodError) {
+      return new ValidationError('Invalid API response', error.issues);
+    }
+    return error instanceof Error ? error : new Error(String(error));
+  },
+});
+```

@@ -1,0 +1,136 @@
+---
+title: Store Interfaces
+description: API reference for CacheStore, DedupeStore, RateLimitStore, and AdaptiveRateLimitStore interfaces
+---
+
+# Store Interfaces
+
+All store backends implement these interfaces from `@http-client-toolkit/core`. You can use them to build custom store backends.
+
+## CacheStore\<T\>
+
+```typescript
+import type { CacheStore } from '@http-client-toolkit/core';
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `get` | `(hash: string) => Promise<T \| undefined>` | Retrieve a cached value by hash |
+| `set` | `(hash: string, value: T, ttlSeconds: number) => Promise<void>` | Store a value with TTL |
+| `delete` | `(hash: string) => Promise<void>` | Remove a cached entry |
+| `clear` | `() => Promise<void>` | Remove all cached entries |
+
+### TTL Semantics
+
+| Value | Behavior |
+|-------|----------|
+| `ttlSeconds > 0` | Expires after N seconds |
+| `ttlSeconds === 0` | Never expires |
+| `ttlSeconds < 0` | Immediately expired |
+
+## DedupeStore\<T\>
+
+```typescript
+import type { DedupeStore } from '@http-client-toolkit/core';
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `register` | `(hash: string) => Promise<string>` | Register as owner, returns job ID |
+| `registerOrJoin` | `(hash: string) => Promise<{ jobId: string; isOwner: boolean }>` | Atomic register or join (optional) |
+| `waitFor` | `(hash: string) => Promise<T \| undefined>` | Wait for the owner to complete |
+| `complete` | `(hash: string, value: T) => Promise<void>` | Mark job as complete with result |
+| `fail` | `(hash: string, error: Error) => Promise<void>` | Mark job as failed |
+| `isInProgress` | `(hash: string) => Promise<boolean>` | Check if a job is in-flight |
+
+### Ownership Pattern
+
+`registerOrJoin()` is the preferred atomic path. It returns `{ jobId, isOwner }`:
+
+- **Owner** (`isOwner: true`): Makes the HTTP request, then calls `complete()` or `fail()`
+- **Joiner** (`isOwner: false`): Calls `waitFor()` to receive the result
+
+If the owner fails, waiters receive `undefined` (not a thrown error).
+
+## RateLimitStore
+
+```typescript
+import type { RateLimitStore } from '@http-client-toolkit/core';
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `acquire` | `(resource: string) => Promise<boolean>` | Atomic check-and-record (optional) |
+| `canProceed` | `(resource: string) => Promise<boolean>` | Check if a request can proceed |
+| `record` | `(resource: string) => Promise<void>` | Record a request |
+| `getStatus` | `(resource: string) => Promise<RateLimitStatus>` | Get current rate limit status |
+| `reset` | `(resource: string) => Promise<void>` | Reset rate limit for a resource |
+| `getWaitTime` | `(resource: string) => Promise<number>` | Get wait time in ms until next request |
+
+### RateLimitStatus
+
+```typescript
+interface RateLimitStatus {
+  remaining: number;
+  resetTime: Date;
+  limit: number;
+}
+```
+
+## AdaptiveRateLimitStore
+
+Extends `RateLimitStore` with priority support.
+
+```typescript
+import type { AdaptiveRateLimitStore } from '@http-client-toolkit/core';
+```
+
+All `RateLimitStore` methods are overloaded to accept an optional `priority` parameter:
+
+```typescript
+canProceed(resource: string, priority?: 'user' | 'background'): Promise<boolean>;
+record(resource: string, priority?: 'user' | 'background'): Promise<void>;
+getStatus(resource: string, priority?: 'user' | 'background'): Promise<AdaptiveRateLimitStatus>;
+```
+
+### AdaptiveRateLimitStatus
+
+Extends `RateLimitStatus` with additional adaptive metrics:
+
+```typescript
+interface AdaptiveRateLimitStatus extends RateLimitStatus {
+  userReserved: number;
+  backgroundMax: number;
+  backgroundPaused: boolean;
+  recentUserActivity: number;
+  reason: string;
+}
+```
+
+## Implementing a Custom Store
+
+To create a custom backend, implement one or more of these interfaces:
+
+```typescript
+import type { CacheStore, DedupeStore, RateLimitStore } from '@http-client-toolkit/core';
+
+class RedisCacheStore<T> implements CacheStore<T> {
+  async get(hash: string): Promise<T | undefined> {
+    // ... Redis GET
+  }
+
+  async set(hash: string, value: T, ttlSeconds: number): Promise<void> {
+    // ... Redis SET with EX
+  }
+
+  async delete(hash: string): Promise<void> {
+    // ... Redis DEL
+  }
+
+  async clear(): Promise<void> {
+    // ... Redis FLUSHDB or pattern delete
+  }
+}
+```
+
+Use Zod for config validation and export from a single `src/index.ts` entry point to follow the existing store pattern.

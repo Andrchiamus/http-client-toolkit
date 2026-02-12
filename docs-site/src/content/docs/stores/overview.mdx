@@ -1,0 +1,113 @@
+---
+title: Store Backends Overview
+description: Compare Memory, SQLite, and DynamoDB store backends
+---
+
+import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Store Backends
+
+HTTP Client Toolkit ships three store backends. Each implements the same interfaces (`CacheStore`, `DedupeStore`, `RateLimitStore`, `AdaptiveRateLimitStore`), so you can swap between them without changing application code.
+
+## Comparison
+
+| | Memory | SQLite | DynamoDB |
+|---|---|---|---|
+| **Persistence** | Process lifetime | Disk | Cloud |
+| **Multi-instance** | No | Shared file | Yes |
+| **Dependencies** | None | better-sqlite3, drizzle-orm | AWS SDK v3 (peer) |
+| **Cleanup** | Background timers | Background timers | Native TTL |
+| **Best for** | Dev, testing, single-process | Persistent local, process restarts | Serverless, distributed |
+
+## Available Stores
+
+Each backend provides four store implementations:
+
+<CardGrid>
+  <Card title="CacheStore" icon="document">
+    Response caching with TTL. Memory uses LRU eviction; SQLite and DynamoDB use entry size limits.
+  </Card>
+  <Card title="DedupeStore" icon="puzzle">
+    Request deduplication with atomic ownership. One caller fetches, others wait for the result.
+  </Card>
+  <Card title="RateLimitStore" icon="warning">
+    Sliding window rate limiter with per-resource configuration.
+  </Card>
+  <Card title="AdaptiveRateLimitStore" icon="rocket">
+    Priority-aware rate limiter that dynamically allocates capacity between user and background requests.
+  </Card>
+</CardGrid>
+
+## Quick Setup
+
+<Tabs>
+  <TabItem label="Memory">
+    ```typescript
+    import { HttpClient } from '@http-client-toolkit/core';
+    import {
+      InMemoryCacheStore,
+      InMemoryDedupeStore,
+      InMemoryRateLimitStore,
+    } from '@http-client-toolkit/store-memory';
+
+    const client = new HttpClient({
+      cache: new InMemoryCacheStore(),
+      dedupe: new InMemoryDedupeStore(),
+      rateLimit: new InMemoryRateLimitStore(),
+    });
+    ```
+  </TabItem>
+  <TabItem label="SQLite">
+    ```typescript
+    import { HttpClient } from '@http-client-toolkit/core';
+    import Database from 'better-sqlite3';
+    import {
+      SQLiteCacheStore,
+      SQLiteDedupeStore,
+      SQLiteRateLimitStore,
+    } from '@http-client-toolkit/store-sqlite';
+
+    const db = new Database('./app.db');
+
+    const client = new HttpClient({
+      cache: new SQLiteCacheStore({ database: db }),
+      dedupe: new SQLiteDedupeStore({ database: db }),
+      rateLimit: new SQLiteRateLimitStore({ database: db }),
+    });
+    ```
+  </TabItem>
+  <TabItem label="DynamoDB">
+    ```typescript
+    import { HttpClient } from '@http-client-toolkit/core';
+    import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+    import {
+      DynamoDBCacheStore,
+      DynamoDBDedupeStore,
+      DynamoDBRateLimitStore,
+    } from '@http-client-toolkit/store-dynamodb';
+
+    const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+
+    const client = new HttpClient({
+      cache: new DynamoDBCacheStore({ client: dynamoClient }),
+      dedupe: new DynamoDBDedupeStore({ client: dynamoClient }),
+      rateLimit: new DynamoDBRateLimitStore({ client: dynamoClient }),
+    });
+    ```
+  </TabItem>
+</Tabs>
+
+## Choosing a Backend
+
+- **Start with Memory** for development and testing. It's fast, has zero dependencies, and requires no setup.
+- **Move to SQLite** when you need data to survive process restarts, or want a single-file persistent store.
+- **Use DynamoDB** for serverless deployments (Lambda), multi-instance applications, or when state must be shared across processes.
+
+You can also **mix backends** — for example, use in-memory cache for speed with a DynamoDB rate limiter for distributed coordination:
+
+```typescript
+const client = new HttpClient({
+  cache: new InMemoryCacheStore(),               // Fast local cache
+  rateLimit: new DynamoDBRateLimitStore({ ... }), // Shared rate limit
+});
+```

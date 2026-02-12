@@ -1,0 +1,91 @@
+---
+title: HTTP Client Toolkit
+description: Pluggable HTTP caching, deduplication, and rate limiting for TypeScript
+template: splash
+hero:
+  tagline: Modular HTTP client middleware with pluggable caching, request deduplication, and adaptive rate limiting — backed by swappable storage backends
+  actions:
+    - text: Get Started
+      link: /http-client-toolkit/getting-started/introduction/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/AllyMurray/http-client-toolkit
+      icon: github
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Features
+
+<CardGrid>
+	<Card title="Pluggable Stores" icon="puzzle">
+		Swap between in-memory, SQLite, and DynamoDB backends without changing application code.
+	</Card>
+	<Card title="Adaptive Rate Limiting" icon="rocket">
+		Priority-aware rate limiter that dynamically shifts capacity between user and background requests.
+	</Card>
+	<Card title="Request Deduplication" icon="document">
+		Automatic dedup ensures only one in-flight request per unique key — concurrent callers share the result.
+	</Card>
+	<Card title="TypeScript First" icon="seti:typescript">
+		Strict TypeScript with full type safety, generics, and Zod runtime validation.
+	</Card>
+</CardGrid>
+
+## Quick Example
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import {
+  InMemoryCacheStore,
+  InMemoryDedupeStore,
+  InMemoryRateLimitStore,
+} from '@http-client-toolkit/store-memory';
+
+const client = new HttpClient(
+  {
+    cache: new InMemoryCacheStore(),
+    dedupe: new InMemoryDedupeStore(),
+    rateLimit: new InMemoryRateLimitStore(),
+  },
+  { defaultCacheTTL: 300 },
+);
+
+const data = await client.get<{ name: string }>(
+  'https://api.example.com/user/1',
+);
+```
+
+## Packages
+
+- **Core** — HTTP client engine, store interfaces, and request hashing
+- **Memory** — In-memory stores with LRU eviction — zero dependencies
+- **SQLite** — Persistent stores via better-sqlite3 and Drizzle ORM
+- **DynamoDB** — Distributed stores for serverless and multi-instance deployments
+
+## Requirements
+
+- Node.js 20+
+- TypeScript 5.0+ (for TypeScript projects)
+
+## Next Steps
+
+<CardGrid>
+	<Card title="Installation" icon="download">
+		Install the core package and pick a store backend.
+		[Get Started →](/http-client-toolkit/getting-started/installation/)
+	</Card>
+	<Card title="Store Backends" icon="puzzle">
+		Compare Memory, SQLite, and DynamoDB stores.
+		[Compare Stores →](/http-client-toolkit/stores/overview/)
+	</Card>
+	<Card title="API Reference" icon="open-book">
+		Explore the HttpClient API and store interfaces.
+		[Browse API →](/http-client-toolkit/api/http-client/)
+	</Card>
+	<Card title="Guides" icon="code">
+		Learn caching, dedup, rate limiting, and error handling patterns.
+		[Read Guides →](/http-client-toolkit/guides/caching/)
+	</Card>
+</CardGrid>

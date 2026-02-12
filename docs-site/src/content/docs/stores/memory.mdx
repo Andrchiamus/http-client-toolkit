@@ -1,0 +1,129 @@
+---
+title: Memory Store
+description: In-memory store implementations with LRU eviction and zero dependencies
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Memory Store
+
+`@http-client-toolkit/store-memory` provides in-memory store implementations. Fast, zero-dependency stores ideal for development, testing, or single-process production use.
+
+## Installation
+
+```bash
+npm install @http-client-toolkit/store-memory
+```
+
+## InMemoryCacheStore
+
+LRU cache with TTL support and dual eviction limits (item count + memory usage).
+
+```typescript
+import { InMemoryCacheStore } from '@http-client-toolkit/store-memory';
+
+const cache = new InMemoryCacheStore({
+  maxItems: 1000,              // Default: 1000
+  maxMemoryBytes: 50_000_000,  // Default: 50 MB
+  cleanupIntervalMs: 60_000,   // Default: 60s. Set to 0 to disable.
+  evictionRatio: 0.1,          // Default: 10% evicted when limits exceeded
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `maxItems` | `number` | `1000` | Maximum number of cached entries |
+| `maxMemoryBytes` | `number` | `50_000_000` | Maximum memory usage in bytes |
+| `cleanupIntervalMs` | `number` | `60_000` | Interval for expired entry cleanup. `0` to disable. |
+| `evictionRatio` | `number` | `0.1` | Fraction of entries evicted when limits exceeded |
+
+### Eviction
+
+When either limit is exceeded, the store evicts the least recently used entries. Expired entries are also removed lazily on `get()` and during scheduled cleanup.
+
+Call `cache.destroy()` when done to clear the cleanup timer.
+
+## InMemoryDedupeStore
+
+Prevents duplicate concurrent requests. If a request for the same hash is already in-flight, subsequent callers wait for the original to complete.
+
+```typescript
+import { InMemoryDedupeStore } from '@http-client-toolkit/store-memory';
+
+const dedupe = new InMemoryDedupeStore({
+  jobTimeoutMs: 300_000,     // Default: 5 minutes
+  cleanupIntervalMs: 60_000, // Default: 60s
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `jobTimeoutMs` | `number` | `300_000` | Timeout for in-flight jobs before cleanup |
+| `cleanupIntervalMs` | `number` | `60_000` | Interval for stale job cleanup |
+
+The store implements atomic `registerOrJoin()` so exactly one caller executes the upstream request under heavy concurrency.
+
+## InMemoryRateLimitStore
+
+Sliding window rate limiter with optional per-resource configuration.
+
+```typescript
+import { InMemoryRateLimitStore } from '@http-client-toolkit/store-memory';
+
+const rateLimit = new InMemoryRateLimitStore({
+  defaultConfig: { limit: 60, windowMs: 60_000 },
+  resourceConfigs: new Map([
+    ['slow-api', { limit: 10, windowMs: 60_000 }],
+  ]),
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `defaultConfig` | `{ limit, windowMs }` | Required | Default rate limit for all resources |
+| `resourceConfigs` | `Map<string, { limit, windowMs }>` | `undefined` | Per-resource overrides |
+
+## AdaptiveRateLimitStore
+
+Priority-aware rate limiter that dynamically allocates capacity between user and background requests based on recent activity patterns.
+
+```typescript
+import { AdaptiveRateLimitStore } from '@http-client-toolkit/store-memory';
+
+const rateLimit = new AdaptiveRateLimitStore({
+  defaultConfig: { limit: 200, windowMs: 3_600_000 },
+  resourceConfigs: new Map([
+    ['search', { limit: 50, windowMs: 60_000 }],
+  ]),
+  adaptiveConfig: {
+    highActivityThreshold: 10,
+    moderateActivityThreshold: 3,
+    monitoringWindowMs: 900_000,
+    maxUserScaling: 2.0,
+  },
+});
+```
+
+### Adaptive Config Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `highActivityThreshold` | `number` | `10` | User requests to trigger high-activity mode |
+| `moderateActivityThreshold` | `number` | `3` | User requests to trigger moderate mode |
+| `monitoringWindowMs` | `number` | `900_000` | Activity monitoring window (15 min) |
+| `maxUserScaling` | `number` | `2.0` | Maximum user capacity multiplier |
+
+### Strategies
+
+| Activity Level | Behavior |
+|----------------|----------|
+| **High** | Prioritizes user requests, pauses background if trend is increasing |
+| **Moderate** | Balanced allocation with trend-aware scaling |
+| **Low** | Scales up background capacity |
+| **Sustained inactivity** | Gives full capacity to background |

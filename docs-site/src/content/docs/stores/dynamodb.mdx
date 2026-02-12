@@ -1,0 +1,286 @@
+---
+title: DynamoDB Store
+description: Distributed DynamoDB stores for serverless and multi-instance deployments
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# DynamoDB Store
+
+`@http-client-toolkit/store-dynamodb` provides distributed stores backed by Amazon DynamoDB. Designed for serverless and multi-instance production deployments where state must be shared across processes.
+
+## Installation
+
+```bash
+npm install @http-client-toolkit/store-dynamodb @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
+```
+
+The AWS SDK packages are peer dependencies — you likely already have them in a serverless project.
+
+## Table Setup
+
+All stores share a single DynamoDB table. The library does **not** create tables at runtime. You must provision the table in infrastructure first.
+
+If the table is missing, store operations throw a clear error:
+
+> DynamoDB table "\<table-name\>" was not found. Create the table using your infrastructure before using DynamoDB stores.
+
+You can reference the required schema from code:
+
+```typescript
+import {
+  TABLE_SCHEMA,
+  DEFAULT_TABLE_NAME,
+} from '@http-client-toolkit/store-dynamodb';
+```
+
+Enable DynamoDB native TTL on the `ttl` attribute for automatic item expiration.
+
+### Infrastructure Examples
+
+<Tabs>
+  <TabItem label="SST v3">
+    ```typescript
+    import { StackContext } from 'sst/constructs';
+    import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+
+    export function Storage({ stack }: StackContext) {
+      const table = new dynamodb.Table(stack, 'HttpClientToolkitTable', {
+        tableName: 'http-client-toolkit',
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+        timeToLiveAttribute: 'ttl',
+      });
+
+      table.addGlobalSecondaryIndex({
+        indexName: 'gsi1',
+        partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      });
+    }
+    ```
+  </TabItem>
+  <TabItem label="CDK">
+    ```typescript
+    import * as cdk from 'aws-cdk-lib';
+    import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, 'HttpClientToolkitStack');
+
+    const table = new dynamodb.Table(stack, 'HttpClientToolkitTable', {
+      tableName: 'http-client-toolkit',
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      timeToLiveAttribute: 'ttl',
+    });
+
+    table.addGlobalSecondaryIndex({
+      indexName: 'gsi1',
+      partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    ```
+  </TabItem>
+  <TabItem label="Pulumi">
+    ```typescript
+    import * as aws from '@pulumi/aws';
+
+    const table = new aws.dynamodb.Table('httpClientToolkitTable', {
+      name: 'http-client-toolkit',
+      billingMode: 'PAY_PER_REQUEST',
+      hashKey: 'pk',
+      rangeKey: 'sk',
+      ttl: { attributeName: 'ttl', enabled: true },
+      attributes: [
+        { name: 'pk', type: 'S' },
+        { name: 'sk', type: 'S' },
+        { name: 'gsi1pk', type: 'S' },
+        { name: 'gsi1sk', type: 'S' },
+      ],
+      globalSecondaryIndexes: [
+        {
+          name: 'gsi1',
+          hashKey: 'gsi1pk',
+          rangeKey: 'gsi1sk',
+          projectionType: 'ALL',
+        },
+      ],
+    });
+    ```
+  </TabItem>
+  <TabItem label="Terraform">
+    ```hcl
+    resource "aws_dynamodb_table" "http_client_toolkit" {
+      name         = "http-client-toolkit"
+      billing_mode = "PAY_PER_REQUEST"
+      hash_key     = "pk"
+      range_key    = "sk"
+
+      attribute {
+        name = "pk"
+        type = "S"
+      }
+
+      attribute {
+        name = "sk"
+        type = "S"
+      }
+
+      attribute {
+        name = "gsi1pk"
+        type = "S"
+      }
+
+      attribute {
+        name = "gsi1sk"
+        type = "S"
+      }
+
+      global_secondary_index {
+        name            = "gsi1"
+        hash_key        = "gsi1pk"
+        range_key       = "gsi1sk"
+        projection_type = "ALL"
+      }
+
+      ttl {
+        attribute_name = "ttl"
+        enabled        = true
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="CloudFormation">
+    ```yaml
+    Resources:
+      HttpClientToolkitTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+          TableName: http-client-toolkit
+          BillingMode: PAY_PER_REQUEST
+          AttributeDefinitions:
+            - AttributeName: pk
+              AttributeType: S
+            - AttributeName: sk
+              AttributeType: S
+            - AttributeName: gsi1pk
+              AttributeType: S
+            - AttributeName: gsi1sk
+              AttributeType: S
+          KeySchema:
+            - AttributeName: pk
+              KeyType: HASH
+            - AttributeName: sk
+              KeyType: RANGE
+          GlobalSecondaryIndexes:
+            - IndexName: gsi1
+              KeySchema:
+                - AttributeName: gsi1pk
+                  KeyType: HASH
+                - AttributeName: gsi1sk
+                  KeyType: RANGE
+              Projection:
+                ProjectionType: ALL
+          TimeToLiveSpecification:
+            AttributeName: ttl
+            Enabled: true
+    ```
+  </TabItem>
+</Tabs>
+
+## Client Configuration
+
+All DynamoDB stores accept a `DynamoDBDocumentClient`, a plain `DynamoDBClient` (auto-wrapped), or no client (created internally with optional `region`):
+
+```typescript
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBCacheStore,
+  DynamoDBDedupeStore,
+  DynamoDBRateLimitStore,
+} from '@http-client-toolkit/store-dynamodb';
+
+const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+
+const cache = new DynamoDBCacheStore({ client: dynamoClient });
+const dedupe = new DynamoDBDedupeStore({ client: dynamoClient });
+const rateLimit = new DynamoDBRateLimitStore({ client: dynamoClient });
+```
+
+## DynamoDBCacheStore
+
+```typescript
+new DynamoDBCacheStore({
+  client: dynamoClient,
+  tableName: 'http-client-toolkit', // Default
+  maxEntrySizeBytes: 390 * 1024,    // Default: 390 KB
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `client` | `DynamoDBClient \| DynamoDBDocumentClient` | Auto-created | DynamoDB client |
+| `tableName` | `string` | `'http-client-toolkit'` | Table name |
+| `maxEntrySizeBytes` | `number` | `399_360` | Max entry size (DynamoDB 400 KB limit minus overhead) |
+
+## DynamoDBDedupeStore
+
+```typescript
+new DynamoDBDedupeStore({
+  client: dynamoClient,
+  jobTimeoutMs: 300_000, // Default: 5 minutes
+  pollIntervalMs: 500,   // Default: 500ms
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `client` | `DynamoDBClient \| DynamoDBDocumentClient` | Auto-created | DynamoDB client |
+| `jobTimeoutMs` | `number` | `300_000` | Timeout for in-flight jobs |
+| `pollIntervalMs` | `number` | `500` | Poll interval (higher than SQLite to reduce API calls) |
+
+## DynamoDBRateLimitStore
+
+```typescript
+new DynamoDBRateLimitStore({
+  client: dynamoClient,
+  defaultConfig: { limit: 60, windowMs: 60_000 },
+  resourceConfigs: new Map([
+    ['slow-api', { limit: 10, windowMs: 60_000 }],
+  ]),
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `client` | `DynamoDBClient \| DynamoDBDocumentClient` | Auto-created | DynamoDB client |
+| `defaultConfig` | `{ limit, windowMs }` | Required | Default rate limit |
+| `resourceConfigs` | `Map<string, { limit, windowMs }>` | `undefined` | Per-resource overrides |
+
+## DynamoDBAdaptiveRateLimitStore
+
+```typescript
+new DynamoDBAdaptiveRateLimitStore({
+  client: dynamoClient,
+  defaultConfig: { limit: 200, windowMs: 3_600_000 },
+  adaptiveConfig: {
+    highActivityThreshold: 10,
+    moderateActivityThreshold: 3,
+  },
+});
+```
+
+See the [Memory store adaptive config](/http-client-toolkit/stores/memory/#adaptiveratelimitstore) for details on the adaptive strategies and configuration options.
+
+## Key Design Notes
+
+- **No cleanup intervals** — DynamoDB native TTL handles automatic item expiration. No background timers needed.
+- **TTL lag** — DynamoDB TTL deletion can be delayed up to 48 hours. Stores check `ttl` in `get()` to filter expired items immediately.
+- **Single-table design** — All store types share one table, separated by key prefixes (`CACHE#`, `DEDUPE#`, `RATELIMIT#`).
+- **`clear()` is expensive** — Uses Scan + BatchWriteItem. DynamoDB has no truncate operation.
+- **GSI for priority queries** — The adaptive rate limit store uses the `gsi1` GSI to efficiently query requests by priority.

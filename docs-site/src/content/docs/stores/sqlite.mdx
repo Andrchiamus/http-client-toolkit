@@ -1,0 +1,137 @@
+---
+title: SQLite Store
+description: Persistent SQLite-backed stores via better-sqlite3 and Drizzle ORM
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# SQLite Store
+
+`@http-client-toolkit/store-sqlite` provides persistent stores backed by SQLite via [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) and [Drizzle ORM](https://orm.drizzle.team/). Data survives process restarts.
+
+## Installation
+
+```bash
+npm install @http-client-toolkit/store-sqlite
+```
+
+## Database Configuration
+
+All SQLite stores accept either a **file path** or an existing **better-sqlite3 Database instance**.
+
+### Shared Database Instance
+
+Passing a shared instance lets multiple stores operate on the same database file:
+
+```typescript
+import Database from 'better-sqlite3';
+import {
+  SQLiteCacheStore,
+  SQLiteDedupeStore,
+  SQLiteRateLimitStore,
+} from '@http-client-toolkit/store-sqlite';
+
+const db = new Database('./app.db');
+
+const cache = new SQLiteCacheStore({ database: db });
+const dedupe = new SQLiteDedupeStore({ database: db });
+const rateLimit = new SQLiteRateLimitStore({ database: db });
+```
+
+### File Path
+
+When a file path is passed, the store manages its own connection and closes it when `close()` is called:
+
+```typescript
+const cache = new SQLiteCacheStore({ database: './cache.db' });
+
+// ... use the cache ...
+
+cache.close(); // Closes the managed connection
+```
+
+By default, stores use `':memory:'` (non-persistent).
+
+## SQLiteCacheStore
+
+```typescript
+new SQLiteCacheStore({
+  database: './cache.db',       // Default: ':memory:'
+  cleanupIntervalMs: 60_000,    // Set to 0 to disable
+  maxEntrySizeBytes: 5_242_880, // Default: 5 MiB
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `database` | `string \| Database` | `':memory:'` | File path or Database instance |
+| `cleanupIntervalMs` | `number` | `60_000` | Expired entry cleanup interval. `0` to disable. |
+| `maxEntrySizeBytes` | `number` | `5_242_880` | Maximum entry size (5 MiB) |
+
+## SQLiteDedupeStore
+
+```typescript
+new SQLiteDedupeStore({
+  database: './dedupe.db',
+  jobTimeoutMs: 300_000,
+  cleanupIntervalMs: 60_000,
+  pollIntervalMs: 100,
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `database` | `string \| Database` | `':memory:'` | File path or Database instance |
+| `jobTimeoutMs` | `number` | `300_000` | Timeout for in-flight jobs |
+| `cleanupIntervalMs` | `number` | `60_000` | Stale job cleanup interval |
+| `pollIntervalMs` | `number` | `100` | Poll interval for cross-instance waiters |
+
+The SQLite dedupe store supports **cross-instance deduplication** — multiple Node.js processes sharing the same database file can deduplicate against each other via polling.
+
+Pending waiters are settled when the store is closed, preventing hanging promises during shutdown.
+
+## SQLiteRateLimitStore
+
+```typescript
+new SQLiteRateLimitStore({
+  database: './ratelimit.db',
+  defaultConfig: { limit: 60, windowMs: 60_000 },
+  resourceConfigs: new Map([
+    ['slow-api', { limit: 10, windowMs: 60_000 }],
+  ]),
+});
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `database` | `string \| Database` | `':memory:'` | File path or Database instance |
+| `defaultConfig` | `{ limit, windowMs }` | Required | Default rate limit |
+| `resourceConfigs` | `Map<string, { limit, windowMs }>` | `undefined` | Per-resource overrides |
+
+## SqliteAdaptiveRateLimitStore
+
+Priority-aware rate limiter with the same adaptive strategies as the in-memory variant, backed by SQLite for persistence.
+
+```typescript
+new SqliteAdaptiveRateLimitStore({
+  database: './ratelimit.db',
+  defaultConfig: { limit: 200, windowMs: 3_600_000 },
+  resourceConfigs: new Map([
+    ['search', { limit: 50, windowMs: 60_000 }],
+  ]),
+  adaptiveConfig: {
+    highActivityThreshold: 10,
+    moderateActivityThreshold: 3,
+    monitoringWindowMs: 900_000,
+    maxUserScaling: 2.0,
+  },
+});
+```
+
+See the [Memory store adaptive config](/http-client-toolkit/stores/memory/#adaptiveratelimitstore) for details on the adaptive strategies and configuration options.

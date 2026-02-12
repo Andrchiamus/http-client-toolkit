@@ -1,0 +1,69 @@
+---
+title: Utilities
+description: API reference for hashRequest, HttpClientError, and other utilities
+---
+
+# Utilities
+
+## hashRequest
+
+Generates deterministic SHA-256 hashes for cache and deduplication keys.
+
+```typescript
+import { hashRequest } from '@http-client-toolkit/core';
+
+const hash = hashRequest('https://api.example.com/search', {
+  q: 'test',
+  page: 1,
+});
+```
+
+### Behavior
+
+- **Deterministic** — Same URL + params always produces the same hash
+- **Order-independent** — `{ a: 1, b: 2 }` and `{ b: 2, a: 1 }` produce the same hash
+- **Normalized primitives** — Numbers and strings are normalized before hashing (`"10"` and `10`, `"true"` and `true` produce the same hash)
+- **Undefined omitted** — `undefined` values are omitted; `null` is preserved
+- **Host-aware** — `HttpClient` hashes by URL origin + path + normalized query params, so identical paths on different hosts do not collide
+
+## HttpClientError
+
+Custom error class wrapping HTTP errors. Includes the HTTP status code when applicable.
+
+```typescript
+import { HttpClientError } from '@http-client-toolkit/core';
+```
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `message` | `string` | Error description |
+| `statusCode` | `number \| undefined` | HTTP status code (e.g. `404`, `500`) |
+
+### Usage
+
+```typescript
+try {
+  await client.get(url);
+} catch (error) {
+  if (error instanceof HttpClientError) {
+    console.log(error.message);    // "Not Found"
+    console.log(error.statusCode); // 404
+  }
+}
+```
+
+## Exports Summary
+
+The `@http-client-toolkit/core` package exports:
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `HttpClient` | Class | Main client class |
+| `HttpClientError` | Class | Error class with `statusCode` |
+| `hashRequest` | Function | Deterministic SHA-256 request hashing |
+| `CacheStore` | Interface | Cache store contract |
+| `DedupeStore` | Interface | Deduplication store contract |
+| `RateLimitStore` | Interface | Rate limit store contract |
+| `AdaptiveRateLimitStore` | Interface | Adaptive rate limit store contract |

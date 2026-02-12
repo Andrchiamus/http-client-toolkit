@@ -1,0 +1,105 @@
+---
+title: Caching
+description: Configure HTTP response caching with TTL and eviction strategies
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Caching
+
+HTTP Client Toolkit provides response caching through the `CacheStore` interface. Cached responses are returned immediately without making a network request, reducing latency and API usage.
+
+## How It Works
+
+When `client.get(url)` is called:
+
+1. The URL and parameters are hashed into a deterministic key
+2. The cache store is checked for a matching entry
+3. If a valid (non-expired) entry exists, it's returned immediately
+4. Otherwise, the request proceeds through the rest of the pipeline
+5. The response is cached with the configured TTL
+
+## Configuring TTL
+
+Set the default cache TTL (in seconds) when creating the client:
+
+```typescript
+const client = new HttpClient(
+  { cache: new InMemoryCacheStore() },
+  { defaultCacheTTL: 300 }, // 5 minutes
+);
+```
+
+### TTL Semantics
+
+All built-in store backends follow the same TTL rules:
+
+| Value | Behavior |
+|-------|----------|
+| `ttlSeconds > 0` | Expires after N seconds |
+| `ttlSeconds === 0` | Never expires (permanent) |
+| `ttlSeconds < 0` | Immediately expired |
+
+## Store Options
+
+Each cache store backend has its own configuration for eviction and limits.
+
+<Tabs>
+  <TabItem label="Memory">
+    ```typescript
+    import { InMemoryCacheStore } from '@http-client-toolkit/store-memory';
+
+    const cache = new InMemoryCacheStore({
+      maxItems: 1000,            // Max cached entries
+      maxMemoryBytes: 50_000_000, // 50 MB memory limit
+      cleanupIntervalMs: 60_000,  // Expired entry cleanup interval
+      evictionRatio: 0.1,         // Evict 10% when limits exceeded
+    });
+    ```
+
+    The in-memory store uses LRU (Least Recently Used) eviction with dual limits — item count and memory usage. Expired entries are removed lazily on `get` and during scheduled cleanup.
+
+    Call `cache.destroy()` when done to clear the cleanup timer.
+  </TabItem>
+  <TabItem label="SQLite">
+    ```typescript
+    import { SQLiteCacheStore } from '@http-client-toolkit/store-sqlite';
+
+    const cache = new SQLiteCacheStore({
+      database: './cache.db',       // File path or Database instance
+      cleanupIntervalMs: 60_000,    // Set to 0 to disable
+      maxEntrySizeBytes: 5_242_880, // 5 MiB per entry
+    });
+    ```
+
+    SQLite stores persist to disk, so cached data survives process restarts. Multiple stores can share a single database file by passing a `better-sqlite3` Database instance.
+  </TabItem>
+  <TabItem label="DynamoDB">
+    ```typescript
+    import { DynamoDBCacheStore } from '@http-client-toolkit/store-dynamodb';
+
+    const cache = new DynamoDBCacheStore({
+      client: dynamoClient,
+      tableName: 'http-client-toolkit',
+      maxEntrySizeBytes: 390 * 1024, // 390 KB (DynamoDB 400 KB limit minus overhead)
+    });
+    ```
+
+    DynamoDB uses native TTL for automatic item expiration — no cleanup timers needed. Note that DynamoDB TTL deletion can be delayed up to 48 hours, but stores filter expired items on read.
+  </TabItem>
+</Tabs>
+
+## Memory Management
+
+In-memory and SQLite stores use background timers for cleanup. These timers call `unref()` so they don't keep the Node.js process alive, but you should still call `destroy()` or `close()` when done:
+
+```typescript
+const cache = new InMemoryCacheStore();
+
+// ... use the cache ...
+
+// Clean up when shutting down
+cache.destroy();
+```
+
+DynamoDB stores don't use timers, so no explicit cleanup is needed.

@@ -1,0 +1,17 @@
+/* HTTP Client Toolkit theme */
+
+/* Light mode */
+:root {
+	--sl-color-accent-low: #dceef3;
+	--sl-color-accent: #0e7490;
+	--sl-color-accent-high: #0c4a5e;
+}
+
+/* Dark mode */
+:root[data-theme='dark'] {
+	--sl-color-accent-low: #133a4a;
+	--sl-color-accent: #0e7490;
+	--sl-color-accent-high: #7dd3fc;
+	--sl-color-black: #0f1419;
+	--sl-color-gray-6: #050a0e;
+}

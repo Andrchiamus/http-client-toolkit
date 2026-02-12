@@ -1,0 +1,131 @@
+---
+title: Introduction
+description: Introduction to the HTTP Client Toolkit
+---
+
+import { Card, CardGrid, Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Introduction
+
+**HTTP Client Toolkit** is a modular TypeScript library for building resilient HTTP clients. It provides pluggable caching, request deduplication, and rate limiting — with swappable storage backends so you can choose the right persistence layer for your environment.
+
+## Why HTTP Client Toolkit?
+
+<CardGrid>
+  <Card title="Composable" icon="puzzle">
+    Every concern — cache, dedupe, rate limit — is a standalone store. Use only what you need, or compose them all together.
+  </Card>
+  <Card title="Swappable Backends" icon="setting">
+    Switch between in-memory, SQLite, and DynamoDB without changing your application code. Each implements the same interface.
+  </Card>
+  <Card title="Adaptive Rate Limiting" icon="rocket">
+    Priority-aware rate limiter that monitors user activity and dynamically shifts capacity between user and background pools.
+  </Card>
+  <Card title="Type Safe" icon="seti:typescript">
+    Strict TypeScript with generics, Zod runtime validation, and full IntelliSense support.
+  </Card>
+</CardGrid>
+
+## Architecture
+
+The core `HttpClient` orchestrates three pluggable concerns in a pipeline:
+
+<Tabs>
+  <TabItem label="Request Flow">
+    ```
+    client.get(url)
+    ┌─────────┐   ┌─────────┐   ┌────────────┐   ┌───────┐
+    │  Cache   │ → │  Dedupe  │ → │ Rate Limit │ → │ Fetch │
+    └─────────┘   └─────────┘   └────────────┘   └───────┘
+         ↑                                             │
+         └─── Transform → Validate → Store result ────┘
+    ```
+  </TabItem>
+  <TabItem label="Store Backends">
+    | Backend | Best For |
+    |---------|----------|
+    | **Memory** | Development, testing, single-process apps |
+    | **SQLite** | Persistent storage, process restarts |
+    | **DynamoDB** | Serverless, multi-instance, distributed |
+  </TabItem>
+</Tabs>
+
+### How the Pipeline Works
+
+1. **Cache** — Return a cached response if available
+2. **Dedupe** — If an identical request is already in-flight, wait for its result instead of making a duplicate call
+3. **Rate Limit** — Wait or throw if the rate limit is exceeded
+4. **Fetch** — Execute the HTTP request
+5. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
+6. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
+
+Each layer is optional. A cache-only client or a rate-limit-only client works just as well.
+
+## Packages
+
+<CardGrid>
+  <Card title="@http-client-toolkit/core" icon="open-book">
+    HTTP client engine, store interfaces (`CacheStore`, `DedupeStore`, `RateLimitStore`), error types, and the `hashRequest` utility.
+  </Card>
+  <Card title="@http-client-toolkit/store-memory" icon="laptop">
+    In-memory stores with LRU eviction, TTL support, and adaptive rate limiting. Zero external dependencies.
+  </Card>
+  <Card title="@http-client-toolkit/store-sqlite" icon="document">
+    SQLite-backed stores via better-sqlite3 and Drizzle ORM. Data survives process restarts.
+  </Card>
+  <Card title="@http-client-toolkit/store-dynamodb" icon="cloud">
+    DynamoDB stores for serverless and multi-instance environments. Uses native TTL — no cleanup timers needed.
+  </Card>
+</CardGrid>
+
+## Key Features
+
+### Every Store is Optional
+
+```typescript
+// Cache-only client
+const client = new HttpClient({ cache: new InMemoryCacheStore() });
+
+// Rate-limited client with no caching
+const client = new HttpClient({
+  rateLimit: new InMemoryRateLimitStore({
+    defaultConfig: { limit: 100, windowMs: 60_000 },
+  }),
+});
+
+// Full stack
+const client = new HttpClient({
+  cache: new SQLiteCacheStore({ database: './app.db' }),
+  dedupe: new SQLiteDedupeStore({ database: './app.db' }),
+  rateLimit: new SqliteAdaptiveRateLimitStore({ database: './app.db' }),
+});
+```
+
+### Priority-Aware Rate Limiting
+
+```typescript
+// User-initiated request — gets higher rate limit allocation
+const data = await client.get(url, { priority: 'user' });
+
+// Background/automated request — lower priority
+const data = await client.get(url, { priority: 'background' });
+```
+
+### Server Header Support
+
+The client respects `Retry-After`, `RateLimit-Remaining`, `X-RateLimit-*`, and structured `RateLimit` headers out of the box.
+
+## Next Steps
+
+<CardGrid>
+  <Card title="Installation" icon="download">
+    Install the core package and a store backend.
+
+    [Continue to Installation →](/http-client-toolkit/getting-started/installation/)
+  </Card>
+  <Card title="Quick Start" icon="rocket">
+    See a complete working example.
+
+    [View Quick Start →](/http-client-toolkit/getting-started/quick-start/)
+  </Card>
+</CardGrid>

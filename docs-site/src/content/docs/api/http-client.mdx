@@ -1,0 +1,165 @@
+---
+title: HttpClient
+description: API reference for the HttpClient class
+---
+
+# HttpClient
+
+The main client class that orchestrates caching, deduplication, and rate limiting.
+
+## Import
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+```
+
+## Constructor
+
+```typescript
+new HttpClient(stores?, options?)
+```
+
+### Stores
+
+All stores are optional. Pass only the ones you need.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `cache` | `CacheStore<T>` | Response caching |
+| `dedupe` | `DedupeStore<T>` | Request deduplication |
+| `rateLimit` | `RateLimitStore \| AdaptiveRateLimitStore` | Rate limiting |
+
+### Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `defaultCacheTTL` | `number` | `3600` | Cache TTL in seconds |
+| `throwOnRateLimit` | `boolean` | `true` | Throw when rate limited vs. wait |
+| `maxWaitTime` | `number` | `60000` | Max wait time in ms before throwing |
+| `responseTransformer` | `(data: unknown) => unknown` | — | Transform raw response data |
+| `responseHandler` | `(data: unknown) => unknown` | — | Validate/process transformed data |
+| `errorHandler` | `(error: unknown) => Error` | — | Convert errors to domain-specific types |
+| `rateLimitHeaders` | `RateLimitHeaderConfig` | defaults | Configure standard/custom header names |
+
+## Methods
+
+### `get<T>(url, options?)`
+
+Makes a GET request through the configured pipeline.
+
+```typescript
+const data = await client.get<{ name: string }>(
+  'https://api.example.com/user/1',
+);
+```
+
+The `url` must be an absolute URL (e.g. `https://api.example.com/items`).
+
+**Request Options**
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `signal` | `AbortSignal` | — | Cancels wait + request when aborted |
+| `priority` | `'user' \| 'background'` | `'background'` | Used by adaptive rate-limit stores |
+
+## Request Flow
+
+When `client.get(url)` is called, the request passes through each configured layer:
+
+1. **Cache** — Return cached response if available
+2. **Dedupe** — If an identical request is already in-flight, wait for its result
+3. **Rate Limit** — Wait or throw if the rate limit is exceeded
+4. **Fetch** — Execute the HTTP request
+5. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
+6. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
+
+## Cache TTL Semantics
+
+Consistent across all built-in stores:
+
+| Value | Behavior |
+|-------|----------|
+| `ttlSeconds > 0` | Expires after N seconds |
+| `ttlSeconds === 0` | Never expires (permanent) |
+| `ttlSeconds < 0` | Immediately expired |
+
+## Header-Based Rate Limiting
+
+The client respects these headers out of the box:
+
+- `Retry-After`
+- `RateLimit-Remaining` / `RateLimit-Reset`
+- `X-RateLimit-Remaining` / `X-RateLimit-Reset`
+- `Rate-Limit-Remaining` / `Rate-Limit-Reset`
+- Combined structured `RateLimit` (e.g. `"default";r=0;t=30`)
+
+Cooldowns are enforced when:
+- The response is a throttling status (`429` or `503`), **or**
+- Remaining quota is explicitly exhausted (`remaining <= 0`)
+
+### Custom Header Names
+
+```typescript
+const client = new HttpClient(stores, {
+  rateLimitHeaders: {
+    retryAfter: ['RetryAfterSeconds'],
+    remaining: ['Remaining-Requests'],
+    reset: ['Window-Reset-Seconds'],
+  },
+});
+```
+
+## Examples
+
+### Cache-Only Client
+
+```typescript
+const client = new HttpClient({ cache: new InMemoryCacheStore() });
+```
+
+### Full Stack with Adaptive Rate Limiting
+
+```typescript
+const client = new HttpClient(
+  {
+    cache: new SQLiteCacheStore({ database: db }),
+    dedupe: new SQLiteDedupeStore({ database: db }),
+    rateLimit: new SqliteAdaptiveRateLimitStore({
+      database: db,
+      defaultConfig: { limit: 200, windowMs: 3_600_000 },
+    }),
+  },
+  {
+    defaultCacheTTL: 600,
+    throwOnRateLimit: false,
+    maxWaitTime: 30_000,
+  },
+);
+```
+
+### With Cancellation
+
+```typescript
+const controller = new AbortController();
+const data = await client.get(url, { signal: controller.signal });
+
+// Cancel from elsewhere
+controller.abort();
+```
+
+### With Response Transformation
+
+```typescript
+import camelcaseKeys from 'camelcase-keys';
+
+const client = new HttpClient(stores, {
+  responseTransformer: (data) =>
+    camelcaseKeys(data as Record<string, unknown>, { deep: true }),
+  responseHandler: (data) => {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Unexpected response shape');
+    }
+    return data;
+  },
+});
+```

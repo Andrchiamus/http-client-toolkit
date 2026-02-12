@@ -1,0 +1,96 @@
+---
+title: Deduplication
+description: Prevent duplicate concurrent HTTP requests with automatic deduplication
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Deduplication
+
+Request deduplication prevents duplicate concurrent requests. If multiple callers request the same resource at the same time, only one HTTP request is made — the others wait and receive the same result.
+
+## How It Works
+
+When a request passes through the dedupe layer:
+
+1. The request URL and parameters are hashed into a key
+2. `registerOrJoin()` is called atomically — exactly one caller becomes the **owner**
+3. The owner makes the HTTP request
+4. Non-owners call `waitFor()` and receive the result when the owner completes
+5. If the owner fails, waiters receive `undefined` (not a thrown error)
+
+```
+Caller A ──→ registerOrJoin() ──→ isOwner: true  ──→ fetch() ──→ complete(result)
+                                                                        │
+Caller B ──→ registerOrJoin() ──→ isOwner: false ──→ waitFor() ─────────┘
+                                                                        │
+Caller C ──→ registerOrJoin() ──→ isOwner: false ──→ waitFor() ─────────┘
+```
+
+## Setup
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import { InMemoryDedupeStore } from '@http-client-toolkit/store-memory';
+
+const client = new HttpClient({
+  dedupe: new InMemoryDedupeStore(),
+});
+```
+
+## Store Options
+
+<Tabs>
+  <TabItem label="Memory">
+    ```typescript
+    const dedupe = new InMemoryDedupeStore({
+      jobTimeoutMs: 300_000,     // 5 minutes — stale jobs are cleaned up
+      cleanupIntervalMs: 60_000, // Cleanup interval for timed-out jobs
+    });
+    ```
+  </TabItem>
+  <TabItem label="SQLite">
+    ```typescript
+    const dedupe = new SQLiteDedupeStore({
+      database: './dedupe.db',
+      jobTimeoutMs: 300_000,
+      cleanupIntervalMs: 60_000,
+      pollIntervalMs: 100, // Poll DB for cross-instance waiters
+    });
+    ```
+
+    The SQLite store uses polling to support cross-instance deduplication — multiple Node.js processes sharing the same database file can deduplicate against each other.
+
+    Pending waiters are settled when the store is closed, preventing hanging promises during shutdown.
+  </TabItem>
+  <TabItem label="DynamoDB">
+    ```typescript
+    const dedupe = new DynamoDBDedupeStore({
+      client: dynamoClient,
+      jobTimeoutMs: 300_000,
+      pollIntervalMs: 500, // Higher than SQLite to reduce API calls
+    });
+    ```
+
+    The DynamoDB store polls for completion with a higher default interval to minimize read costs.
+  </TabItem>
+</Tabs>
+
+## Atomic Ownership
+
+All built-in stores implement atomic `registerOrJoin()` so exactly one caller executes the upstream request, even under heavy concurrency. If you implement a custom dedupe store, expose `registerOrJoin` to get the same strict single-owner behavior.
+
+## Combining with Cache
+
+Deduplication and caching work well together. The cache prevents repeated requests over time, while dedup prevents concurrent duplicate requests within a single moment:
+
+```typescript
+const client = new HttpClient({
+  cache: new InMemoryCacheStore(),
+  dedupe: new InMemoryDedupeStore(),
+});
+
+// First request: cache miss → dedupe owner → fetch → cache result
+// Concurrent request: cache miss → dedupe joiner → waits → gets same result
+// Later request: cache hit → returned immediately (no dedupe needed)
+```

@@ -1,0 +1,173 @@
+---
+title: Quick Start
+description: Get up and running with HTTP Client Toolkit in minutes
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+# Quick Start
+
+This guide walks you through setting up an HTTP client with caching, deduplication, and rate limiting.
+
+## Basic Setup
+
+The simplest way to get started is with in-memory stores:
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import {
+  InMemoryCacheStore,
+  InMemoryDedupeStore,
+  InMemoryRateLimitStore,
+} from '@http-client-toolkit/store-memory';
+
+const client = new HttpClient(
+  {
+    cache: new InMemoryCacheStore(),
+    dedupe: new InMemoryDedupeStore(),
+    rateLimit: new InMemoryRateLimitStore(),
+  },
+  { defaultCacheTTL: 300 },
+);
+
+const data = await client.get<{ name: string }>(
+  'https://api.example.com/user/1',
+);
+```
+
+## Use Only What You Need
+
+Every store is optional. Pick the concerns you care about:
+
+<Tabs>
+  <TabItem label="Cache Only">
+    ```typescript
+    const client = new HttpClient({
+      cache: new InMemoryCacheStore(),
+    });
+    ```
+  </TabItem>
+  <TabItem label="Rate Limit Only">
+    ```typescript
+    const client = new HttpClient({
+      rateLimit: new InMemoryRateLimitStore({
+        defaultConfig: { limit: 100, windowMs: 60_000 },
+      }),
+    });
+    ```
+  </TabItem>
+  <TabItem label="Cache + Dedupe">
+    ```typescript
+    const client = new HttpClient({
+      cache: new InMemoryCacheStore(),
+      dedupe: new InMemoryDedupeStore(),
+    });
+    ```
+  </TabItem>
+</Tabs>
+
+## Persistent Storage
+
+For data that should survive process restarts, use SQLite stores:
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import Database from 'better-sqlite3';
+import {
+  SQLiteCacheStore,
+  SQLiteDedupeStore,
+  SQLiteRateLimitStore,
+} from '@http-client-toolkit/store-sqlite';
+
+const db = new Database('./app.db');
+
+const client = new HttpClient({
+  cache: new SQLiteCacheStore({ database: db }),
+  dedupe: new SQLiteDedupeStore({ database: db }),
+  rateLimit: new SQLiteRateLimitStore({ database: db }),
+});
+```
+
+## Distributed / Serverless
+
+For multi-instance or serverless environments, use DynamoDB stores:
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBCacheStore,
+  DynamoDBDedupeStore,
+  DynamoDBRateLimitStore,
+} from '@http-client-toolkit/store-dynamodb';
+
+const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+
+const client = new HttpClient({
+  cache: new DynamoDBCacheStore({ client: dynamoClient }),
+  dedupe: new DynamoDBDedupeStore({ client: dynamoClient }),
+  rateLimit: new DynamoDBRateLimitStore({ client: dynamoClient }),
+});
+```
+
+:::note
+DynamoDB stores require a pre-provisioned table. See the [DynamoDB store guide](/http-client-toolkit/stores/dynamodb/) for table setup instructions.
+:::
+
+## Full Example
+
+Here's a more complete example using SQLite with adaptive rate limiting, response transformation, and error handling:
+
+```typescript
+import { HttpClient, HttpClientError } from '@http-client-toolkit/core';
+import Database from 'better-sqlite3';
+import {
+  SQLiteCacheStore,
+  SQLiteDedupeStore,
+  SqliteAdaptiveRateLimitStore,
+} from '@http-client-toolkit/store-sqlite';
+
+const db = new Database('./http-store.db');
+
+const client = new HttpClient(
+  {
+    cache: new SQLiteCacheStore({ database: db }),
+    dedupe: new SQLiteDedupeStore({ database: db }),
+    rateLimit: new SqliteAdaptiveRateLimitStore({
+      database: db,
+      defaultConfig: { limit: 200, windowMs: 3_600_000 },
+    }),
+  },
+  {
+    defaultCacheTTL: 600,
+    throwOnRateLimit: false,
+    maxWaitTime: 30_000,
+    responseTransformer: (data) => data,
+  },
+);
+
+try {
+  // User-initiated request — gets higher rate limit allocation
+  const user = await client.get<{ name: string }>(
+    'https://api.example.com/user/1',
+    { priority: 'user' },
+  );
+
+  // Background sync — lower priority
+  const items = await client.get<Array<{ id: number }>>(
+    'https://api.example.com/items',
+    { priority: 'background' },
+  );
+} catch (error) {
+  if (error instanceof HttpClientError) {
+    console.error(error.message, error.statusCode);
+  }
+}
+```
+
+## Next Steps
+
+- Learn about [caching strategies](/http-client-toolkit/guides/caching/)
+- Explore [rate limiting options](/http-client-toolkit/guides/rate-limiting/)
+- Compare [store backends](/http-client-toolkit/stores/overview/)
+- Read the [API reference](/http-client-toolkit/api/http-client/)

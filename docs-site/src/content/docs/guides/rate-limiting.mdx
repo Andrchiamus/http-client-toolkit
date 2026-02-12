@@ -1,0 +1,173 @@
+---
+title: Rate Limiting
+description: Configure sliding window and adaptive rate limiting
+---
+
+import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+# Rate Limiting
+
+HTTP Client Toolkit provides two rate limiting strategies: a basic **sliding window** limiter and an **adaptive** limiter that dynamically allocates capacity between user and background requests.
+
+## Basic Rate Limiting
+
+The sliding window rate limiter tracks request timestamps per resource:
+
+```typescript
+import { HttpClient } from '@http-client-toolkit/core';
+import { InMemoryRateLimitStore } from '@http-client-toolkit/store-memory';
+
+const client = new HttpClient(
+  {
+    rateLimit: new InMemoryRateLimitStore({
+      defaultConfig: { limit: 60, windowMs: 60_000 }, // 60 requests per minute
+    }),
+  },
+  {
+    throwOnRateLimit: true, // Default: throw when rate limited
+    maxWaitTime: 60_000,    // Max time to wait if throwOnRateLimit is false
+  },
+);
+```
+
+### Per-Resource Configuration
+
+Set different limits for different API endpoints:
+
+```typescript
+const rateLimit = new InMemoryRateLimitStore({
+  defaultConfig: { limit: 60, windowMs: 60_000 },
+  resourceConfigs: new Map([
+    ['slow-api', { limit: 10, windowMs: 60_000 }],
+    ['search', { limit: 30, windowMs: 60_000 }],
+  ]),
+});
+```
+
+Rate limits are tracked per inferred resource name. The client derives this from the URL path's last segment (for example, `/v1/users/42` maps to resource `42`). Use explicit `resourceConfigs` keys that match your URL patterns.
+
+## Adaptive Rate Limiting
+
+The adaptive rate limiter monitors user activity and dynamically shifts capacity between user and background request pools:
+
+```typescript
+import { AdaptiveRateLimitStore } from '@http-client-toolkit/store-memory';
+
+const rateLimit = new AdaptiveRateLimitStore({
+  defaultConfig: { limit: 200, windowMs: 3_600_000 }, // 200 req/hour
+  adaptiveConfig: {
+    highActivityThreshold: 10,     // User requests to trigger high-activity mode
+    moderateActivityThreshold: 3,  // User requests to trigger moderate mode
+    monitoringWindowMs: 900_000,   // 15-minute activity window
+    maxUserScaling: 2.0,           // Max user capacity multiplier
+  },
+});
+```
+
+### Adaptive Strategies
+
+The store automatically selects a strategy based on recent user activity:
+
+| Activity Level | Behavior |
+|----------------|----------|
+| **High** | Prioritizes user requests, pauses background if trend is increasing |
+| **Moderate** | Balanced allocation with trend-aware scaling |
+| **Low** | Scales up background capacity |
+| **Sustained inactivity** | Gives full capacity to background |
+
+### Using Priority
+
+When using an adaptive store, pass a priority on each request:
+
+```typescript
+// User-initiated request — higher allocation
+const data = await client.get(url, { priority: 'user' });
+
+// Background/automated request — lower priority
+const data = await client.get(url, { priority: 'background' });
+```
+
+`HttpClient` always forwards `priority` to rate-limit store methods. Adaptive stores use it to allocate capacity; basic `RateLimitStore` implementations safely ignore the extra argument.
+
+## Header-Based Rate Limiting
+
+`HttpClient` also respects server-provided rate-limit headers and applies an origin-level cooldown when appropriate.
+
+### Supported Headers
+
+Out of the box:
+
+- `Retry-After`
+- `RateLimit-Remaining` / `RateLimit-Reset`
+- `X-RateLimit-Remaining` / `X-RateLimit-Reset`
+- `Rate-Limit-Remaining` / `Rate-Limit-Reset`
+- Combined structured `RateLimit` (e.g. `"default";r=0;t=30`)
+
+### When Cooldowns Apply
+
+The client only enforces reset-based cooldowns when:
+
+- The response is a throttling status (`429` or `503`), **or**
+- Remaining quota is explicitly exhausted (`remaining <= 0`)
+
+### Custom Header Names
+
+Map non-standard header names for specific APIs:
+
+```typescript
+const client = new HttpClient(
+  { rateLimit },
+  {
+    rateLimitHeaders: {
+      retryAfter: ['RetryAfterSeconds'],
+      remaining: ['Remaining-Requests'],
+      reset: ['Window-Reset-Seconds'],
+    },
+  },
+);
+```
+
+## Throw vs. Wait
+
+Control what happens when a rate limit is hit:
+
+<Tabs>
+  <TabItem label="Throw (default)">
+    ```typescript
+    const client = new HttpClient(
+      { rateLimit },
+      { throwOnRateLimit: true },
+    );
+
+    // Throws HttpClientError when rate limited
+    ```
+  </TabItem>
+  <TabItem label="Wait">
+    ```typescript
+    const client = new HttpClient(
+      { rateLimit },
+      {
+        throwOnRateLimit: false,
+        maxWaitTime: 30_000, // Wait up to 30 seconds
+      },
+    );
+
+    // Waits for the rate limit window to open, then retries
+    // Throws if maxWaitTime is exceeded
+    ```
+  </TabItem>
+</Tabs>
+
+## Cancellation
+
+Rate limit waits can be cancelled with an `AbortSignal`:
+
+```typescript
+const controller = new AbortController();
+
+// If rate limited with throwOnRateLimit: false, the wait is cancellable
+const data = await client.get(url, { signal: controller.signal });
+
+// Cancel from elsewhere
+controller.abort();
+```
