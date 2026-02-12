@@ -265,65 +265,75 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
     await this.readyPromise;
 
     const pk = `DEDUPE#${hash}`;
-    const candidateJobId = randomUUID();
-    const now = Date.now();
-    const ttl =
-      this.jobTimeoutMs > 0 ? Math.floor((now + this.jobTimeoutMs) / 1000) : 0;
+    const maxAttempts = 3;
 
-    // Conditional put: only succeed if item doesn't exist or isn't pending
-    try {
-      await this.docClient.send(
-        new PutCommand({
-          TableName: this.tableName,
-          Item: {
-            pk,
-            sk: pk,
-            jobId: candidateJobId,
-            status: 'pending',
-            result: null,
-            error: null,
-            createdAt: now,
-            updatedAt: now,
-            ttl,
-          },
-          ConditionExpression:
-            'attribute_not_exists(pk) OR #status <> :pending',
-          ExpressionAttributeNames: { '#status': 'status' },
-          ExpressionAttributeValues: { ':pending': 'pending' },
-        }),
-      );
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const candidateJobId = randomUUID();
+      const now = Date.now();
+      const ttl =
+        this.jobTimeoutMs > 0
+          ? Math.floor((now + this.jobTimeoutMs) / 1000)
+          : 0;
 
-      return { jobId: candidateJobId, isOwner: true };
-    } catch (error: unknown) {
-      throwIfDynamoTableMissing(error, this.tableName);
-      // ConditionalCheckFailedException means a pending job already exists
-      if (
-        error &&
-        typeof error === 'object' &&
-        'name' in error &&
-        error.name === 'ConditionalCheckFailedException'
-      ) {
-        // Read the existing item to get its jobId
-        const existing = await this.docClient.send(
-          new GetCommand({
+      // Conditional put: only succeed if item doesn't exist or isn't pending
+      try {
+        await this.docClient.send(
+          new PutCommand({
             TableName: this.tableName,
-            Key: { pk, sk: pk },
+            Item: {
+              pk,
+              sk: pk,
+              jobId: candidateJobId,
+              status: 'pending',
+              result: null,
+              error: null,
+              createdAt: now,
+              updatedAt: now,
+              ttl,
+            },
+            ConditionExpression:
+              'attribute_not_exists(pk) OR #status <> :pending',
+            ExpressionAttributeNames: { '#status': 'status' },
+            ExpressionAttributeValues: { ':pending': 'pending' },
           }),
         );
 
-        if (existing.Item) {
-          return {
-            jobId: existing.Item['jobId'] as string,
-            isOwner: false,
-          };
-        }
+        return { jobId: candidateJobId, isOwner: true };
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        // ConditionalCheckFailedException means a pending job already exists
+        if (
+          error &&
+          typeof error === 'object' &&
+          'name' in error &&
+          error.name === 'ConditionalCheckFailedException'
+        ) {
+          // Read the existing item to get its jobId
+          const existing = await this.docClient.send(
+            new GetCommand({
+              TableName: this.tableName,
+              Key: { pk, sk: pk },
+            }),
+          );
 
-        // Race condition: item was deleted between the failed put and the get
-        // Try again
-        return this.registerOrJoin(hash);
+          if (existing.Item) {
+            return {
+              jobId: existing.Item['jobId'] as string,
+              isOwner: false,
+            };
+          }
+
+          // Race condition: item was deleted between the failed put and the get
+          // Retry on next iteration
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
+
+    throw new Error(
+      `Failed to register or join job for hash "${hash}" after ${maxAttempts} attempts`,
+    );
   }
 
   async complete(hash: string, value: T | undefined): Promise<void> {
