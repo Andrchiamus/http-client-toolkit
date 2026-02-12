@@ -437,8 +437,12 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
         scanResult = await this.docClient.send(
           new ScanCommand({
             TableName: this.tableName,
-            FilterExpression: 'begins_with(pk, :prefix)',
-            ExpressionAttributeValues: { ':prefix': 'RATELIMIT#' },
+            FilterExpression:
+              'begins_with(pk, :prefix) OR begins_with(pk, :slotPrefix)',
+            ExpressionAttributeValues: {
+              ':prefix': 'RATELIMIT#',
+              ':slotPrefix': 'RATELIMIT_SLOT#',
+            },
             ProjectionExpression: 'pk, sk',
             ExclusiveStartKey: lastEvaluatedKey,
           }),
@@ -633,42 +637,50 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
   }
 
   private async deleteResourceItems(resource: string): Promise<void> {
-    let lastEvaluatedKey: Record<string, unknown> | undefined;
+    const partitionKeys = [
+      `RATELIMIT#${resource}`,
+      `RATELIMIT_SLOT#${resource}#user`,
+      `RATELIMIT_SLOT#${resource}#background`,
+    ];
 
-    do {
-      let queryResult;
-      try {
-        queryResult = await this.docClient.send(
-          new QueryCommand({
-            TableName: this.tableName,
-            KeyConditionExpression: 'pk = :pk',
-            ExpressionAttributeValues: { ':pk': `RATELIMIT#${resource}` },
-            ProjectionExpression: 'pk, sk',
-            ExclusiveStartKey: lastEvaluatedKey,
-          }),
-        );
-      } catch (error: unknown) {
-        throwIfDynamoTableMissing(error, this.tableName);
-        throw error;
-      }
+    for (const pk of partitionKeys) {
+      let lastEvaluatedKey: Record<string, unknown> | undefined;
 
-      const items = queryResult.Items ?? [];
-      if (items.length > 0) {
+      do {
+        let queryResult;
         try {
-          await batchDeleteWithRetries(
-            this.docClient,
-            this.tableName,
-            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
+          queryResult = await this.docClient.send(
+            new QueryCommand({
+              TableName: this.tableName,
+              KeyConditionExpression: 'pk = :pk',
+              ExpressionAttributeValues: { ':pk': pk },
+              ProjectionExpression: 'pk, sk',
+              ExclusiveStartKey: lastEvaluatedKey,
+            }),
           );
         } catch (error: unknown) {
           throwIfDynamoTableMissing(error, this.tableName);
           throw error;
         }
-      }
 
-      lastEvaluatedKey = queryResult.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
-    } while (lastEvaluatedKey);
+        const items = queryResult.Items ?? [];
+        if (items.length > 0) {
+          try {
+            await batchDeleteWithRetries(
+              this.docClient,
+              this.tableName,
+              items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
+            );
+          } catch (error: unknown) {
+            throwIfDynamoTableMissing(error, this.tableName);
+            throw error;
+          }
+        }
+
+        lastEvaluatedKey = queryResult.LastEvaluatedKey as
+          | Record<string, unknown>
+          | undefined;
+      } while (lastEvaluatedKey);
+    }
   }
 }

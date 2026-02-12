@@ -76,16 +76,20 @@ describe('DynamoDBRateLimitStore', () => {
     });
 
     it('should reset rate limits', async () => {
-      ddbMock.on(QueryCommand).resolvesOnce({
-        Items: [
-          { pk: 'RATELIMIT#test', sk: 'TS#123#uuid1' },
-          { pk: 'RATELIMIT#test', sk: 'TS#124#uuid2' },
-        ],
-      });
+      ddbMock
+        .on(QueryCommand)
+        .resolvesOnce({
+          Items: [
+            { pk: 'RATELIMIT#test', sk: 'TS#123#uuid1' },
+            { pk: 'RATELIMIT#test', sk: 'TS#124#uuid2' },
+          ],
+        })
+        // Slot partition key query returns empty
+        .resolvesOnce({ Items: [] });
       ddbMock.on(BatchWriteCommand).resolvesOnce({});
 
       await store.reset('test');
-      expect(ddbMock.calls()).toHaveLength(2);
+      expect(ddbMock.calls()).toHaveLength(3);
     });
 
     it('should handle reset with pagination', async () => {
@@ -97,11 +101,13 @@ describe('DynamoDBRateLimitStore', () => {
         })
         .resolvesOnce({
           Items: [{ pk: 'RATELIMIT#test', sk: 'TS#2#u2' }],
-        });
+        })
+        // Slot partition key query returns empty
+        .resolvesOnce({ Items: [] });
       ddbMock.on(BatchWriteCommand).resolves({});
 
       await store.reset('test');
-      expect(ddbMock.calls()).toHaveLength(4);
+      expect(ddbMock.calls()).toHaveLength(5);
     });
   });
 

@@ -326,8 +326,12 @@ describe('DynamoDBAdaptiveRateLimitStore', () => {
         store as unknown as { lastCapacityUpdate: Map<string, number> }
       ).lastCapacityUpdate.set('reset-resource', Date.now());
 
-      // Query + BatchWrite for delete
-      ddbMock.on(QueryCommand).resolvesOnce({ Items: [] });
+      // Query for each partition key (RATELIMIT#, RATELIMIT_SLOT#user, RATELIMIT_SLOT#background)
+      ddbMock
+        .on(QueryCommand)
+        .resolvesOnce({ Items: [] })
+        .resolvesOnce({ Items: [] })
+        .resolvesOnce({ Items: [] });
 
       await store.reset('reset-resource');
 
