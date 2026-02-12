@@ -4,11 +4,12 @@ A modular HTTP client toolkit with pluggable caching, deduplication, and rate li
 
 ## Packages
 
-| Package                                                  | Description                         |
-| -------------------------------------------------------- | ----------------------------------- |
-| [`@http-client-toolkit/core`](#core)                     | HTTP client and store interfaces    |
-| [`@http-client-toolkit/store-memory`](#in-memory-stores) | In-memory store implementations     |
-| [`@http-client-toolkit/store-sqlite`](#sqlite-stores)    | SQLite-backed store implementations |
+| Package                                                   | Description                           |
+| --------------------------------------------------------- | ------------------------------------- |
+| [`@http-client-toolkit/core`](#core)                      | HTTP client and store interfaces      |
+| [`@http-client-toolkit/store-memory`](#in-memory-stores)  | In-memory store implementations       |
+| [`@http-client-toolkit/store-sqlite`](#sqlite-stores)     | SQLite-backed store implementations   |
+| [`@http-client-toolkit/store-dynamodb`](#dynamodb-stores) | DynamoDB-backed store implementations |
 
 ## Installation
 
@@ -26,6 +27,10 @@ npm install @http-client-toolkit/store-memory
 
 ```bash
 npm install @http-client-toolkit/store-sqlite
+```
+
+```bash
+npm install @http-client-toolkit/store-dynamodb @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
 ```
 
 Requires Node.js >= 20.
@@ -405,6 +410,80 @@ new SqliteAdaptiveRateLimitStore({
   database: "./ratelimit.db",
   defaultConfig: { limit: 200, windowMs: 3_600_000 },
   resourceConfigs: new Map([...]),
+  adaptiveConfig: { highActivityThreshold: 10 },
+});
+```
+
+## DynamoDB Stores
+
+Distributed stores backed by Amazon DynamoDB. Suitable for serverless and multi-instance production deployments where state must be shared across processes.
+
+All stores share a single DynamoDB table. DynamoDB native TTL handles automatic item expiration — no background cleanup intervals are needed.
+
+The DynamoDB package does not create tables at runtime. If the table is missing, store operations throw a clear error telling you to provision the table in infrastructure.
+
+For infrastructure examples (SST v3, CDK, Pulumi, Terraform, CloudFormation), see `packages/store-dynamodb/README.md`.
+
+```bash
+npm install @http-client-toolkit/store-dynamodb @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
+```
+
+All DynamoDB stores accept a `DynamoDBDocumentClient`, a plain `DynamoDBClient` (auto-wrapped), or no client (created internally with optional `region`):
+
+```typescript
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBCacheStore,
+  DynamoDBDedupeStore,
+  DynamoDBRateLimitStore,
+  DynamoDBAdaptiveRateLimitStore,
+} from '@http-client-toolkit/store-dynamodb';
+
+const dynamoClient = new DynamoDBClient({ region: 'us-east-1' });
+
+const cache = new DynamoDBCacheStore({ client: dynamoClient });
+const dedupe = new DynamoDBDedupeStore({ client: dynamoClient });
+const rateLimit = new DynamoDBRateLimitStore({ client: dynamoClient });
+
+const client = new HttpClient({ cache, dedupe, rateLimit });
+```
+
+### DynamoDBCacheStore
+
+```typescript
+new DynamoDBCacheStore({
+  client: dynamoClient,
+  tableName: 'http-client-toolkit', // Default
+  maxEntrySizeBytes: 390 * 1024, // Default: 390 KB (DynamoDB 400 KB limit minus overhead)
+});
+```
+
+### DynamoDBDedupeStore
+
+```typescript
+new DynamoDBDedupeStore({
+  client: dynamoClient,
+  jobTimeoutMs: 300_000, // Default: 5 minutes
+  pollIntervalMs: 500, // Default: 500ms
+});
+```
+
+### DynamoDBRateLimitStore
+
+```typescript
+new DynamoDBRateLimitStore({
+  client: dynamoClient,
+  defaultConfig: { limit: 60, windowMs: 60_000 },
+  resourceConfigs: new Map([['slow-api', { limit: 10, windowMs: 60_000 }]]),
+});
+```
+
+### DynamoDBAdaptiveRateLimitStore
+
+```typescript
+new DynamoDBAdaptiveRateLimitStore({
+  client: dynamoClient,
+  defaultConfig: { limit: 200, windowMs: 3_600_000 },
   adaptiveConfig: { highActivityThreshold: 10 },
 });
 ```

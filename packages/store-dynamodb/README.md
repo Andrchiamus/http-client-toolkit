@@ -16,9 +16,13 @@ Requires Node.js >= 20.
 
 All stores share a single DynamoDB table (default name: `http-client-toolkit`) with a partition key `pk` (String), sort key `sk` (String), and a GSI named `gsi1`.
 
-**Option 1: Create the table yourself** (recommended for production)
+The library does **not** create tables at runtime. You must provision the table in infrastructure first.
 
-Use the AWS Console, CloudFormation, CDK, or Terraform. The required schema is exported as `TABLE_SCHEMA`:
+At runtime, store operations throw a clear error if the table is missing:
+
+`DynamoDB table "<table-name>" was not found. Create the table using your infrastructure before using DynamoDB stores.`
+
+You can still reference the required schema from code via `TABLE_SCHEMA`:
 
 ```typescript
 import {
@@ -29,20 +33,163 @@ import {
 
 Enable DynamoDB native TTL on the `ttl` attribute for automatic item expiration.
 
-**Option 2: Auto-create at startup** (development only)
+### Infrastructure Examples
+
+#### SST v3
 
 ```typescript
-const cache = new DynamoDBCacheStore({ ensureTableExists: true });
+import { StackContext } from 'sst/constructs';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+
+export function Storage({ stack }: StackContext) {
+  const table = new dynamodb.Table(stack, 'HttpClientToolkitTable', {
+    tableName: 'http-client-toolkit',
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    timeToLiveAttribute: 'ttl',
+  });
+
+  table.addGlobalSecondaryIndex({
+    indexName: 'gsi1',
+    partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+}
 ```
 
-**Option 3: Setup script**
+#### AWS CDK
 
 ```typescript
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { createTable } from '@http-client-toolkit/store-dynamodb';
+import * as cdk from 'aws-cdk-lib';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 
-const client = new DynamoDBClient({ region: 'us-east-1' });
-await createTable(client, 'my-table-name');
+const app = new cdk.App();
+const stack = new cdk.Stack(app, 'HttpClientToolkitStack');
+
+const table = new dynamodb.Table(stack, 'HttpClientToolkitTable', {
+  tableName: 'http-client-toolkit',
+  billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+  partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+  sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+  timeToLiveAttribute: 'ttl',
+});
+
+table.addGlobalSecondaryIndex({
+  indexName: 'gsi1',
+  partitionKey: { name: 'gsi1pk', type: dynamodb.AttributeType.STRING },
+  sortKey: { name: 'gsi1sk', type: dynamodb.AttributeType.STRING },
+  projectionType: dynamodb.ProjectionType.ALL,
+});
+```
+
+#### Pulumi (TypeScript)
+
+```typescript
+import * as aws from '@pulumi/aws';
+
+const table = new aws.dynamodb.Table('httpClientToolkitTable', {
+  name: 'http-client-toolkit',
+  billingMode: 'PAY_PER_REQUEST',
+  hashKey: 'pk',
+  rangeKey: 'sk',
+  ttl: { attributeName: 'ttl', enabled: true },
+  attributes: [
+    { name: 'pk', type: 'S' },
+    { name: 'sk', type: 'S' },
+    { name: 'gsi1pk', type: 'S' },
+    { name: 'gsi1sk', type: 'S' },
+  ],
+  globalSecondaryIndexes: [
+    {
+      name: 'gsi1',
+      hashKey: 'gsi1pk',
+      rangeKey: 'gsi1sk',
+      projectionType: 'ALL',
+    },
+  ],
+});
+```
+
+#### Terraform
+
+```hcl
+resource "aws_dynamodb_table" "http_client_toolkit" {
+  name         = "http-client-toolkit"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "gsi1sk"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "gsi1"
+    hash_key        = "gsi1pk"
+    range_key       = "gsi1sk"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+}
+```
+
+#### CloudFormation
+
+```yaml
+Resources:
+  HttpClientToolkitTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: http-client-toolkit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 ```
 
 ## Usage
@@ -74,7 +221,6 @@ new DynamoDBCacheStore({
   client: dynamoClient,
   tableName: 'http-client-toolkit', // Default
   maxEntrySizeBytes: 390 * 1024, // Default: 390 KB (DynamoDB 400 KB limit minus overhead)
-  ensureTableExists: false, // Default
 });
 ```
 
