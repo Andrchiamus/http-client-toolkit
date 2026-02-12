@@ -40,8 +40,7 @@ All stores are optional. Pass only the ones you need.
 | `responseHandler` | `(data: unknown) => unknown` | — | Validate/process transformed data |
 | `errorHandler` | `(error: unknown) => Error` | — | Convert errors to domain-specific types |
 | `rateLimitHeaders` | `RateLimitHeaderConfig` | defaults | Configure standard/custom header names |
-| `respectCacheHeaders` | `boolean` | `false` | Respect HTTP cache headers (RFC 9111) |
-| `cacheHeaderOverrides` | `object` | — | Override specific cache header behaviors (see below) |
+| `cacheOverrides` | `object` | — | Override specific cache header behaviors (see below) |
 
 ## Methods
 
@@ -113,9 +112,9 @@ const client = new HttpClient(stores, {
 
 ## Cache Header Support
 
-When `respectCacheHeaders: true`, the client respects `Cache-Control`, `ETag`, `Last-Modified`, and `Expires` headers per RFC 9111. See the [Cache Headers guide](/http-client-toolkit/guides/cache-headers/) for details.
+The client respects `Cache-Control`, `ETag`, `Last-Modified`, and `Expires` headers per RFC 9111. See the [Caching guide](/http-client-toolkit/guides/caching/) for details.
 
-### `cacheHeaderOverrides`
+### `cacheOverrides`
 
 | Property | Type | Description |
 |----------|------|-------------|
