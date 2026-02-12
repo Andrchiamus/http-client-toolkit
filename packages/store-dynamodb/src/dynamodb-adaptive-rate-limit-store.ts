@@ -616,8 +616,11 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
   private cleanupOldRequests(requests: Array<number>): void {
     const cutoff =
       Date.now() - this.capacityCalculator.config.monitoringWindowMs;
-    while (requests.length > 0 && requests[0]! < cutoff) {
-      requests.shift();
+    const idx = requests.findIndex((t) => t >= cutoff);
+    if (idx > 0) {
+      requests.splice(0, idx);
+    } else if (idx === -1 && requests.length > 0) {
+      requests.length = 0;
     }
   }
 
