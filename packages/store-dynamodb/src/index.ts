@@ -8,12 +8,7 @@ export type { DynamoDBDedupeStoreOptions } from './dynamodb-dedupe-store.js';
 export type { DynamoDBRateLimitStoreOptions } from './dynamodb-rate-limit-store.js';
 export type { DynamoDBAdaptiveRateLimitStoreOptions } from './dynamodb-adaptive-rate-limit-store.js';
 
-export {
-  createTable,
-  ensureTable,
-  DEFAULT_TABLE_NAME,
-  TABLE_SCHEMA,
-} from './table.js';
+export { DEFAULT_TABLE_NAME, TABLE_SCHEMA } from './table.js';
 
 export type { RateLimitConfig } from '@http-client-toolkit/core';
 

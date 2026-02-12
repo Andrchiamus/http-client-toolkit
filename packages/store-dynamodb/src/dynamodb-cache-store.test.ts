@@ -1,4 +1,7 @@
-import { DynamoDBClient, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBClient,
+  ResourceNotFoundException,
+} from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -12,14 +15,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DynamoDBCacheStore } from './dynamodb-cache-store.js';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
-const rawDdbMock = mockClient(DynamoDBClient);
 
 describe('DynamoDBCacheStore', () => {
   let store: DynamoDBCacheStore;
 
   beforeEach(() => {
     ddbMock.reset();
-    rawDdbMock.reset();
     store = new DynamoDBCacheStore({
       client: DynamoDBDocumentClient.from(new DynamoDBClient({})),
     });
@@ -320,21 +321,17 @@ describe('DynamoDBCacheStore', () => {
       s.destroy();
     });
 
-    it('should handle ensureTableExists option', async () => {
-      rawDdbMock
-        .on(DescribeTableCommand)
-        .resolvesOnce({ Table: { TableStatus: 'ACTIVE' } });
+    it('should throw a clear error when the table is missing', async () => {
+      ddbMock.on(GetCommand).rejectsOnce(
+        new ResourceNotFoundException({
+          message: 'Requested resource not found',
+          $metadata: {},
+        }),
+      );
 
-      const rawClient = new DynamoDBClient({ region: 'us-east-1' });
-      const s = new DynamoDBCacheStore({
-        client: rawClient,
-        ensureTableExists: true,
-      });
-
-      // Trigger readyPromise — mock doc client for get
-      ddbMock.on(GetCommand).resolves({});
-      await s.get('test').catch(() => {});
-      s.destroy();
+      await expect(store.get('missing')).rejects.toThrow(
+        'was not found. Create the table using your infrastructure',
+      );
     });
   });
 

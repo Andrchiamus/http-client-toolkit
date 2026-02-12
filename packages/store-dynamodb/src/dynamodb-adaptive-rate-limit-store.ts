@@ -8,7 +8,7 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
-  BatchWriteCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   AdaptiveCapacityCalculator,
@@ -20,7 +20,13 @@ import {
   type DynamicCapacityResult,
 } from '@http-client-toolkit/core';
 import { z } from 'zod';
-import { DEFAULT_TABLE_NAME, ensureTable } from './table.js';
+import { DEFAULT_TABLE_NAME } from './table.js';
+import { throwIfDynamoTableMissing } from './table-missing-error.js';
+import {
+  batchDeleteWithRetries,
+  queryCountAllPages,
+  queryItemsAllPages,
+} from './dynamodb-utils.js';
 
 const DEFAULT_ADAPTIVE_RATE_LIMIT: RateLimitConfig = {
   limit: 200,
@@ -31,7 +37,6 @@ export interface DynamoDBAdaptiveRateLimitStoreOptions {
   client?: DynamoDBDocumentClient | DynamoDBClient;
   region?: string;
   tableName?: string;
-  ensureTableExists?: boolean;
   defaultConfig?: RateLimitConfig;
   resourceConfigs?: Map<string, RateLimitConfig>;
   adaptiveConfig?: Partial<z.input<typeof AdaptiveConfigSchema>>;
@@ -57,7 +62,6 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     client,
     region,
     tableName = DEFAULT_TABLE_NAME,
-    ensureTableExists = false,
     defaultConfig = DEFAULT_ADAPTIVE_RATE_LIMIT,
     resourceConfigs = new Map<string, RateLimitConfig>(),
     adaptiveConfig = {},
@@ -81,16 +85,7 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
       this.isClientManaged = true;
     }
 
-    if (ensureTableExists) {
-      const rawForTable =
-        this.rawClient ??
-        (client instanceof DynamoDBClient
-          ? client
-          : new DynamoDBClient(region ? { region } : {}));
-      this.readyPromise = ensureTable(rawForTable, this.tableName);
-    } else {
-      this.readyPromise = Promise.resolve();
-    }
+    this.readyPromise = Promise.resolve();
   }
 
   async canProceed(
@@ -124,6 +119,120 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     }
   }
 
+  async acquire(
+    resource: string,
+    priority: RequestPriority = 'background',
+  ): Promise<boolean> {
+    if (this.isDestroyed) {
+      throw new Error('Rate limit store has been destroyed');
+    }
+
+    await this.readyPromise;
+
+    await this.ensureActivityMetrics(resource);
+    const metrics = this.getOrCreateActivityMetrics(resource);
+    const capacity = this.calculateCurrentCapacity(resource, metrics);
+
+    if (priority === 'background' && capacity.backgroundPaused) {
+      return false;
+    }
+
+    const limitForPriority =
+      priority === 'user' ? capacity.userReserved : capacity.backgroundMax;
+
+    if (limitForPriority <= 0) {
+      return false;
+    }
+
+    const config = this.resourceConfigs.get(resource) ?? this.defaultConfig;
+    const now = Date.now();
+    const windowStart = now - config.windowMs;
+    const ttl = Math.floor((now + config.windowMs) / 1000);
+    const uuid = randomUUID();
+    const slotPrefix = `RATELIMIT_SLOT#${resource}#${priority}`;
+    const startSlot = Math.floor(Math.random() * limitForPriority);
+
+    for (let offset = 0; offset < limitForPriority; offset++) {
+      const slot = (startSlot + offset) % limitForPriority;
+
+      try {
+        await this.docClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: {
+                    pk: slotPrefix,
+                    sk: `SLOT#${slot}`,
+                    timestamp: now,
+                    ttl,
+                  },
+                  ConditionExpression:
+                    'attribute_not_exists(pk) OR #timestamp < :windowStart',
+                  ExpressionAttributeNames: {
+                    '#timestamp': 'timestamp',
+                  },
+                  ExpressionAttributeValues: {
+                    ':windowStart': windowStart,
+                  },
+                },
+              },
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: {
+                    pk: `RATELIMIT#${resource}`,
+                    sk: `TS#${now}#${uuid}`,
+                    gsi1pk: `RATELIMIT#${resource}#${priority}`,
+                    gsi1sk: `TS#${now}#${uuid}`,
+                    ttl,
+                    timestamp: now,
+                    priority,
+                  },
+                },
+              },
+            ],
+          }),
+        );
+
+        if (priority === 'user') {
+          metrics.recentUserRequests.push(now);
+          this.cleanupOldRequests(metrics.recentUserRequests);
+        } else {
+          metrics.recentBackgroundRequests.push(now);
+          this.cleanupOldRequests(metrics.recentBackgroundRequests);
+        }
+
+        metrics.userActivityTrend =
+          this.capacityCalculator.calculateActivityTrend(
+            metrics.recentUserRequests,
+          );
+
+        return true;
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+
+        const isConditionalTransactionFailure =
+          error &&
+          typeof error === 'object' &&
+          'name' in error &&
+          error.name === 'TransactionCanceledException' &&
+          'message' in error &&
+          typeof error.message === 'string' &&
+          error.message.includes('ConditionalCheckFailed');
+
+        if (isConditionalTransactionFailure) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    return false;
+  }
+
   async record(
     resource: string,
     priority: RequestPriority = 'background',
@@ -139,20 +248,25 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     const ttl = Math.floor((now + config.windowMs) / 1000);
     const uuid = randomUUID();
 
-    await this.docClient.send(
-      new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          pk: `RATELIMIT#${resource}`,
-          sk: `TS#${now}#${uuid}`,
-          gsi1pk: `RATELIMIT#${resource}#${priority}`,
-          gsi1sk: `TS#${now}#${uuid}`,
-          ttl,
-          timestamp: now,
-          priority,
-        },
-      }),
-    );
+    try {
+      await this.docClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: {
+            pk: `RATELIMIT#${resource}`,
+            sk: `TS#${now}#${uuid}`,
+            gsi1pk: `RATELIMIT#${resource}#${priority}`,
+            gsi1sk: `TS#${now}#${uuid}`,
+            ttl,
+            timestamp: now,
+            priority,
+          },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     // Update in-memory activity metrics
     const metrics = this.getOrCreateActivityMetrics(resource);
@@ -266,19 +380,25 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     const now = Date.now();
     const windowStart = now - config.windowMs;
 
-    const result = await this.docClient.send(
-      new QueryCommand({
-        TableName: this.tableName,
-        IndexName: 'gsi1',
-        KeyConditionExpression: 'gsi1pk = :gsi1pk AND gsi1sk >= :skStart',
-        ExpressionAttributeValues: {
-          ':gsi1pk': `RATELIMIT#${resource}#${priority}`,
-          ':skStart': `TS#${windowStart}`,
-        },
-        Limit: 1,
-        ScanIndexForward: true,
-      }),
-    );
+    let result;
+    try {
+      result = await this.docClient.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: 'gsi1',
+          KeyConditionExpression: 'gsi1pk = :gsi1pk AND gsi1sk >= :skStart',
+          ExpressionAttributeValues: {
+            ':gsi1pk': `RATELIMIT#${resource}#${priority}`,
+            ':skStart': `TS#${windowStart}`,
+          },
+          Limit: 1,
+          ScanIndexForward: true,
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     const oldestItem = result.Items?.[0];
     if (!oldestItem) {
@@ -312,31 +432,33 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     let lastEvaluatedKey: Record<string, unknown> | undefined;
 
     do {
-      const scanResult = await this.docClient.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression: 'begins_with(pk, :prefix)',
-          ExpressionAttributeValues: { ':prefix': 'RATELIMIT#' },
-          ProjectionExpression: 'pk, sk',
-          ExclusiveStartKey: lastEvaluatedKey,
-        }),
-      );
+      let scanResult;
+      try {
+        scanResult = await this.docClient.send(
+          new ScanCommand({
+            TableName: this.tableName,
+            FilterExpression: 'begins_with(pk, :prefix)',
+            ExpressionAttributeValues: { ':prefix': 'RATELIMIT#' },
+            ProjectionExpression: 'pk, sk',
+            ExclusiveStartKey: lastEvaluatedKey,
+          }),
+        );
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        throw error;
+      }
 
       const items = scanResult.Items ?? [];
       if (items.length > 0) {
-        for (let i = 0; i < items.length; i += 25) {
-          const batch = items.slice(i, i + 25);
-          await this.docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [this.tableName]: batch.map((item) => ({
-                  DeleteRequest: {
-                    Key: { pk: item['pk'], sk: item['sk'] },
-                  },
-                })),
-              },
-            }),
+        try {
+          await batchDeleteWithRetries(
+            this.docClient,
+            this.tableName,
+            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
           );
+        } catch (error: unknown) {
+          throwIfDynamoTableMissing(error, this.tableName);
+          throw error;
         }
       }
 
@@ -411,8 +533,9 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     const now = Date.now();
     const windowStart = now - this.capacityCalculator.config.monitoringWindowMs;
 
-    const userResult = await this.docClient.send(
-      new QueryCommand({
+    let userItems;
+    try {
+      userItems = await queryItemsAllPages(this.docClient, {
         TableName: this.tableName,
         IndexName: 'gsi1',
         KeyConditionExpression: 'gsi1pk = :gsi1pk AND gsi1sk >= :skStart',
@@ -422,11 +545,15 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
         },
         ProjectionExpression: '#ts',
         ExpressionAttributeNames: { '#ts': 'timestamp' },
-      }),
-    );
+      });
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
-    const backgroundResult = await this.docClient.send(
-      new QueryCommand({
+    let backgroundItems;
+    try {
+      backgroundItems = await queryItemsAllPages(this.docClient, {
         TableName: this.tableName,
         IndexName: 'gsi1',
         KeyConditionExpression: 'gsi1pk = :gsi1pk AND gsi1sk >= :skStart',
@@ -436,15 +563,17 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
         },
         ProjectionExpression: '#ts',
         ExpressionAttributeNames: { '#ts': 'timestamp' },
-      }),
-    );
+      });
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     const metrics: ActivityMetrics = {
-      recentUserRequests:
-        userResult.Items?.map((item) => item['timestamp'] as number) ?? [],
-      recentBackgroundRequests:
-        backgroundResult.Items?.map((item) => item['timestamp'] as number) ??
-        [],
+      recentUserRequests: userItems.map((item) => item['timestamp'] as number),
+      recentBackgroundRequests: backgroundItems.map(
+        (item) => item['timestamp'] as number,
+      ),
       userActivityTrend: 'none',
     };
 
@@ -463,8 +592,8 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     const now = Date.now();
     const windowStart = now - config.windowMs;
 
-    const result = await this.docClient.send(
-      new QueryCommand({
+    try {
+      return await queryCountAllPages(this.docClient, {
         TableName: this.tableName,
         IndexName: 'gsi1',
         KeyConditionExpression: 'gsi1pk = :gsi1pk AND gsi1sk >= :skStart',
@@ -473,10 +602,11 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
           ':skStart': `TS#${windowStart}`,
         },
         Select: 'COUNT',
-      }),
-    );
-
-    return result.Count ?? 0;
+      });
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
   }
 
   private cleanupOldRequests(requests: Array<number>): void {
@@ -506,31 +636,33 @@ export class DynamoDBAdaptiveRateLimitStore implements IAdaptiveRateLimitStore {
     let lastEvaluatedKey: Record<string, unknown> | undefined;
 
     do {
-      const queryResult = await this.docClient.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          KeyConditionExpression: 'pk = :pk',
-          ExpressionAttributeValues: { ':pk': `RATELIMIT#${resource}` },
-          ProjectionExpression: 'pk, sk',
-          ExclusiveStartKey: lastEvaluatedKey,
-        }),
-      );
+      let queryResult;
+      try {
+        queryResult = await this.docClient.send(
+          new QueryCommand({
+            TableName: this.tableName,
+            KeyConditionExpression: 'pk = :pk',
+            ExpressionAttributeValues: { ':pk': `RATELIMIT#${resource}` },
+            ProjectionExpression: 'pk, sk',
+            ExclusiveStartKey: lastEvaluatedKey,
+          }),
+        );
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        throw error;
+      }
 
       const items = queryResult.Items ?? [];
       if (items.length > 0) {
-        for (let i = 0; i < items.length; i += 25) {
-          const batch = items.slice(i, i + 25);
-          await this.docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [this.tableName]: batch.map((item) => ({
-                  DeleteRequest: {
-                    Key: { pk: item['pk'], sk: item['sk'] },
-                  },
-                })),
-              },
-            }),
+        try {
+          await batchDeleteWithRetries(
+            this.docClient,
+            this.tableName,
+            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
           );
+        } catch (error: unknown) {
+          throwIfDynamoTableMissing(error, this.tableName);
+          throw error;
         }
       }
 

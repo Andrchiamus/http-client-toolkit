@@ -8,20 +8,24 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
-  BatchWriteCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   type RateLimitConfig,
   type RateLimitStore,
   DEFAULT_RATE_LIMIT,
 } from '@http-client-toolkit/core';
-import { DEFAULT_TABLE_NAME, ensureTable } from './table.js';
+import { DEFAULT_TABLE_NAME } from './table.js';
+import { throwIfDynamoTableMissing } from './table-missing-error.js';
+import {
+  batchDeleteWithRetries,
+  queryCountAllPages,
+} from './dynamodb-utils.js';
 
 export interface DynamoDBRateLimitStoreOptions {
   client?: DynamoDBDocumentClient | DynamoDBClient;
   region?: string;
   tableName?: string;
-  ensureTableExists?: boolean;
   defaultConfig?: RateLimitConfig;
   resourceConfigs?: Map<string, RateLimitConfig>;
 }
@@ -40,7 +44,6 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
     client,
     region,
     tableName = DEFAULT_TABLE_NAME,
-    ensureTableExists = false,
     defaultConfig = DEFAULT_RATE_LIMIT,
     resourceConfigs = new Map<string, RateLimitConfig>(),
   }: DynamoDBRateLimitStoreOptions = {}) {
@@ -62,16 +65,7 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
       this.isClientManaged = true;
     }
 
-    if (ensureTableExists) {
-      const rawForTable =
-        this.rawClient ??
-        (client instanceof DynamoDBClient
-          ? client
-          : new DynamoDBClient(region ? { region } : {}));
-      this.readyPromise = ensureTable(rawForTable, this.tableName);
-    } else {
-      this.readyPromise = Promise.resolve();
-    }
+    this.readyPromise = Promise.resolve();
   }
 
   async canProceed(resource: string): Promise<boolean> {
@@ -92,6 +86,90 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
     return currentCount < config.limit;
   }
 
+  async acquire(resource: string): Promise<boolean> {
+    if (this.isDestroyed) {
+      throw new Error('Rate limit store has been destroyed');
+    }
+
+    await this.readyPromise;
+
+    const config = this.resourceConfigs.get(resource) ?? this.defaultConfig;
+    if (config.limit <= 0) {
+      return false;
+    }
+
+    const now = Date.now();
+    const windowStart = now - config.windowMs;
+    const ttl = Math.floor((now + config.windowMs) / 1000);
+    const eventId = randomUUID();
+    const slotPrefix = `RATELIMIT_SLOT#${resource}`;
+    const startSlot = Math.floor(Math.random() * config.limit);
+
+    for (let offset = 0; offset < config.limit; offset++) {
+      const slot = (startSlot + offset) % config.limit;
+
+      try {
+        await this.docClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: {
+                    pk: slotPrefix,
+                    sk: `SLOT#${slot}`,
+                    timestamp: now,
+                    ttl,
+                  },
+                  ConditionExpression:
+                    'attribute_not_exists(pk) OR #timestamp < :windowStart',
+                  ExpressionAttributeNames: {
+                    '#timestamp': 'timestamp',
+                  },
+                  ExpressionAttributeValues: {
+                    ':windowStart': windowStart,
+                  },
+                },
+              },
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: {
+                    pk: `RATELIMIT#${resource}`,
+                    sk: `TS#${now}#${eventId}`,
+                    ttl,
+                    timestamp: now,
+                  },
+                },
+              },
+            ],
+          }),
+        );
+
+        return true;
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+
+        const isConditionalTransactionFailure =
+          error &&
+          typeof error === 'object' &&
+          'name' in error &&
+          error.name === 'TransactionCanceledException' &&
+          'message' in error &&
+          typeof error.message === 'string' &&
+          error.message.includes('ConditionalCheckFailed');
+
+        if (isConditionalTransactionFailure) {
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    return false;
+  }
+
   async record(resource: string): Promise<void> {
     if (this.isDestroyed) {
       throw new Error('Rate limit store has been destroyed');
@@ -104,17 +182,22 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
     const ttl = Math.floor((now + config.windowMs) / 1000);
     const uuid = randomUUID();
 
-    await this.docClient.send(
-      new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          pk: `RATELIMIT#${resource}`,
-          sk: `TS#${now}#${uuid}`,
-          ttl,
-          timestamp: now,
-        },
-      }),
-    );
+    try {
+      await this.docClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: {
+            pk: `RATELIMIT#${resource}`,
+            sk: `TS#${now}#${uuid}`,
+            ttl,
+            timestamp: now,
+          },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
   }
 
   async getStatus(resource: string): Promise<{
@@ -181,18 +264,24 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
     }
 
     // Find oldest request in window
-    const result = await this.docClient.send(
-      new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'pk = :pk AND sk >= :skStart',
-        ExpressionAttributeValues: {
-          ':pk': `RATELIMIT#${resource}`,
-          ':skStart': `TS#${windowStart}`,
-        },
-        Limit: 1,
-        ScanIndexForward: true,
-      }),
-    );
+    let result;
+    try {
+      result = await this.docClient.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'pk = :pk AND sk >= :skStart',
+          ExpressionAttributeValues: {
+            ':pk': `RATELIMIT#${resource}`,
+            ':skStart': `TS#${windowStart}`,
+          },
+          Limit: 1,
+          ScanIndexForward: true,
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     const oldestItem = result.Items?.[0];
     if (!oldestItem) {
@@ -226,31 +315,33 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
     let lastEvaluatedKey: Record<string, unknown> | undefined;
 
     do {
-      const scanResult = await this.docClient.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression: 'begins_with(pk, :prefix)',
-          ExpressionAttributeValues: { ':prefix': 'RATELIMIT#' },
-          ProjectionExpression: 'pk, sk',
-          ExclusiveStartKey: lastEvaluatedKey,
-        }),
-      );
+      let scanResult;
+      try {
+        scanResult = await this.docClient.send(
+          new ScanCommand({
+            TableName: this.tableName,
+            FilterExpression: 'begins_with(pk, :prefix)',
+            ExpressionAttributeValues: { ':prefix': 'RATELIMIT#' },
+            ProjectionExpression: 'pk, sk',
+            ExclusiveStartKey: lastEvaluatedKey,
+          }),
+        );
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        throw error;
+      }
 
       const items = scanResult.Items ?? [];
       if (items.length > 0) {
-        for (let i = 0; i < items.length; i += 25) {
-          const batch = items.slice(i, i + 25);
-          await this.docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [this.tableName]: batch.map((item) => ({
-                  DeleteRequest: {
-                    Key: { pk: item['pk'], sk: item['sk'] },
-                  },
-                })),
-              },
-            }),
+        try {
+          await batchDeleteWithRetries(
+            this.docClient,
+            this.tableName,
+            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
           );
+        } catch (error: unknown) {
+          throwIfDynamoTableMissing(error, this.tableName);
+          throw error;
         }
       }
 
@@ -276,8 +367,8 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
     resource: string,
     windowStart: number,
   ): Promise<number> {
-    const result = await this.docClient.send(
-      new QueryCommand({
+    try {
+      return await queryCountAllPages(this.docClient, {
         TableName: this.tableName,
         KeyConditionExpression: 'pk = :pk AND sk >= :skStart',
         ExpressionAttributeValues: {
@@ -285,40 +376,44 @@ export class DynamoDBRateLimitStore implements RateLimitStore {
           ':skStart': `TS#${windowStart}`,
         },
         Select: 'COUNT',
-      }),
-    );
-    return result.Count ?? 0;
+      });
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
   }
 
   private async deleteResourceItems(resource: string): Promise<void> {
     let lastEvaluatedKey: Record<string, unknown> | undefined;
 
     do {
-      const queryResult = await this.docClient.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          KeyConditionExpression: 'pk = :pk',
-          ExpressionAttributeValues: { ':pk': `RATELIMIT#${resource}` },
-          ProjectionExpression: 'pk, sk',
-          ExclusiveStartKey: lastEvaluatedKey,
-        }),
-      );
+      let queryResult;
+      try {
+        queryResult = await this.docClient.send(
+          new QueryCommand({
+            TableName: this.tableName,
+            KeyConditionExpression: 'pk = :pk',
+            ExpressionAttributeValues: { ':pk': `RATELIMIT#${resource}` },
+            ProjectionExpression: 'pk, sk',
+            ExclusiveStartKey: lastEvaluatedKey,
+          }),
+        );
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        throw error;
+      }
 
       const items = queryResult.Items ?? [];
       if (items.length > 0) {
-        for (let i = 0; i < items.length; i += 25) {
-          const batch = items.slice(i, i + 25);
-          await this.docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [this.tableName]: batch.map((item) => ({
-                  DeleteRequest: {
-                    Key: { pk: item['pk'], sk: item['sk'] },
-                  },
-                })),
-              },
-            }),
+        try {
+          await batchDeleteWithRetries(
+            this.docClient,
+            this.tableName,
+            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
           );
+        } catch (error: unknown) {
+          throwIfDynamoTableMissing(error, this.tableName);
+          throw error;
         }
       }
 

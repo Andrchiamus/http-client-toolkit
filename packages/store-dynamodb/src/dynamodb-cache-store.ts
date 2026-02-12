@@ -8,16 +8,16 @@ import {
   PutCommand,
   DeleteCommand,
   ScanCommand,
-  BatchWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { CacheStore } from '@http-client-toolkit/core';
-import { DEFAULT_TABLE_NAME, ensureTable } from './table.js';
+import { DEFAULT_TABLE_NAME } from './table.js';
+import { throwIfDynamoTableMissing } from './table-missing-error.js';
+import { batchDeleteWithRetries } from './dynamodb-utils.js';
 
 export interface DynamoDBCacheStoreOptions {
   client?: DynamoDBDocumentClient | DynamoDBClient;
   region?: string;
   tableName?: string;
-  ensureTableExists?: boolean;
   maxEntrySizeBytes?: number;
 }
 
@@ -34,7 +34,6 @@ export class DynamoDBCacheStore<T = unknown> implements CacheStore<T> {
     client,
     region,
     tableName = DEFAULT_TABLE_NAME,
-    ensureTableExists = false,
     maxEntrySizeBytes = 390 * 1024,
   }: DynamoDBCacheStoreOptions = {}) {
     this.tableName = tableName;
@@ -54,16 +53,7 @@ export class DynamoDBCacheStore<T = unknown> implements CacheStore<T> {
       this.isClientManaged = true;
     }
 
-    if (ensureTableExists) {
-      const rawForTable =
-        this.rawClient ??
-        (client instanceof DynamoDBClient
-          ? client
-          : new DynamoDBClient(region ? { region } : {}));
-      this.readyPromise = ensureTable(rawForTable, this.tableName);
-    } else {
-      this.readyPromise = Promise.resolve();
-    }
+    this.readyPromise = Promise.resolve();
   }
 
   async get(hash: string): Promise<T | undefined> {
@@ -75,12 +65,18 @@ export class DynamoDBCacheStore<T = unknown> implements CacheStore<T> {
 
     const pk = `CACHE#${hash}`;
 
-    const result = await this.docClient.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: { pk, sk: pk },
-      }),
-    );
+    let result;
+    try {
+      result = await this.docClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: { pk, sk: pk },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     if (!result.Item) {
       return undefined;
@@ -142,18 +138,23 @@ export class DynamoDBCacheStore<T = unknown> implements CacheStore<T> {
 
     const pk = `CACHE#${hash}`;
 
-    await this.docClient.send(
-      new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          pk,
-          sk: pk,
-          value: serializedValue,
-          ttl,
-          createdAt: now,
-        },
-      }),
-    );
+    try {
+      await this.docClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: {
+            pk,
+            sk: pk,
+            value: serializedValue,
+            ttl,
+            createdAt: now,
+          },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
   }
 
   async delete(hash: string): Promise<void> {
@@ -165,12 +166,17 @@ export class DynamoDBCacheStore<T = unknown> implements CacheStore<T> {
 
     const pk = `CACHE#${hash}`;
 
-    await this.docClient.send(
-      new DeleteCommand({
-        TableName: this.tableName,
-        Key: { pk, sk: pk },
-      }),
-    );
+    try {
+      await this.docClient.send(
+        new DeleteCommand({
+          TableName: this.tableName,
+          Key: { pk, sk: pk },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
   }
 
   async clear(): Promise<void> {
@@ -183,32 +189,33 @@ export class DynamoDBCacheStore<T = unknown> implements CacheStore<T> {
     let lastEvaluatedKey: Record<string, unknown> | undefined;
 
     do {
-      const scanResult = await this.docClient.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression: 'begins_with(pk, :prefix)',
-          ExpressionAttributeValues: { ':prefix': 'CACHE#' },
-          ProjectionExpression: 'pk, sk',
-          ExclusiveStartKey: lastEvaluatedKey,
-        }),
-      );
+      let scanResult;
+      try {
+        scanResult = await this.docClient.send(
+          new ScanCommand({
+            TableName: this.tableName,
+            FilterExpression: 'begins_with(pk, :prefix)',
+            ExpressionAttributeValues: { ':prefix': 'CACHE#' },
+            ProjectionExpression: 'pk, sk',
+            ExclusiveStartKey: lastEvaluatedKey,
+          }),
+        );
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        throw error;
+      }
 
       const items = scanResult.Items ?? [];
       if (items.length > 0) {
-        // BatchWriteItem supports up to 25 items per request
-        for (let i = 0; i < items.length; i += 25) {
-          const batch = items.slice(i, i + 25);
-          await this.docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [this.tableName]: batch.map((item) => ({
-                  DeleteRequest: {
-                    Key: { pk: item['pk'], sk: item['sk'] },
-                  },
-                })),
-              },
-            }),
+        try {
+          await batchDeleteWithRetries(
+            this.docClient,
+            this.tableName,
+            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
           );
+        } catch (error: unknown) {
+          throwIfDynamoTableMissing(error, this.tableName);
+          throw error;
         }
       }
 

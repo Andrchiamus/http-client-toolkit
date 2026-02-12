@@ -1,4 +1,7 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBClient,
+  ResourceNotFoundException,
+} from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   PutCommand,
@@ -49,6 +52,19 @@ describe('DynamoDBRateLimitStore', () => {
       expect(putInput.Item?.pk).toBe('RATELIMIT#test-resource');
       expect(putInput.Item?.sk).toMatch(/^TS#\d+#/);
       expect(putInput.Item?.ttl).toBeGreaterThan(0);
+    });
+
+    it('should throw a clear error when the table is missing', async () => {
+      ddbMock.on(PutCommand).rejectsOnce(
+        new ResourceNotFoundException({
+          message: 'Requested resource not found',
+          $metadata: {},
+        }),
+      );
+
+      await expect(store.record('missing-table')).rejects.toThrow(
+        'was not found. Create the table using your infrastructure',
+      );
     });
 
     it('should provide status information', async () => {

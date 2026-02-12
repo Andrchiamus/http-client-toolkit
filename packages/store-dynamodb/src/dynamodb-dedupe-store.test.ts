@@ -1,4 +1,7 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBClient,
+  ResourceNotFoundException,
+} from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -80,6 +83,19 @@ describe('DynamoDBDedupeStore', () => {
       ddbMock.on(PutCommand).rejectsOnce(new Error('Access denied'));
       await expect(store.registerOrJoin('test-hash')).rejects.toThrow(
         'Access denied',
+      );
+    });
+
+    it('should throw a clear error when the table is missing', async () => {
+      ddbMock.on(PutCommand).rejectsOnce(
+        new ResourceNotFoundException({
+          message: 'Requested resource not found',
+          $metadata: {},
+        }),
+      );
+
+      await expect(store.registerOrJoin('test-hash')).rejects.toThrow(
+        'was not found. Create the table using your infrastructure',
       );
     });
 
@@ -365,7 +381,7 @@ describe('DynamoDBDedupeStore', () => {
 
       const updateInput = ddbMock.commandCalls(UpdateCommand)[0]!.args[0].input;
       expect(updateInput.ExpressionAttributeValues?.[':error']).toBe(
-        'test error',
+        'Job failed',
       );
     });
 

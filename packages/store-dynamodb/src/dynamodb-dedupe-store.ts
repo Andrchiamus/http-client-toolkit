@@ -9,17 +9,17 @@ import {
   PutCommand,
   DeleteCommand,
   ScanCommand,
-  BatchWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { DedupeStore } from '@http-client-toolkit/core';
-import { DEFAULT_TABLE_NAME, ensureTable } from './table.js';
+import { DEFAULT_TABLE_NAME } from './table.js';
+import { throwIfDynamoTableMissing } from './table-missing-error.js';
+import { batchDeleteWithRetries } from './dynamodb-utils.js';
 
 export interface DynamoDBDedupeStoreOptions {
   client?: DynamoDBDocumentClient | DynamoDBClient;
   region?: string;
   tableName?: string;
-  ensureTableExists?: boolean;
   jobTimeoutMs?: number;
   pollIntervalMs?: number;
 }
@@ -40,7 +40,6 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
     client,
     region,
     tableName = DEFAULT_TABLE_NAME,
-    ensureTableExists = false,
     jobTimeoutMs = 300_000,
     pollIntervalMs = 500,
   }: DynamoDBDedupeStoreOptions = {}) {
@@ -62,16 +61,7 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
       this.isClientManaged = true;
     }
 
-    if (ensureTableExists) {
-      const rawForTable =
-        this.rawClient ??
-        (client instanceof DynamoDBClient
-          ? client
-          : new DynamoDBClient(region ? { region } : {}));
-      this.readyPromise = ensureTable(rawForTable, this.tableName);
-    } else {
-      this.readyPromise = Promise.resolve();
-    }
+    this.readyPromise = Promise.resolve();
   }
 
   async waitFor(hash: string): Promise<T | undefined> {
@@ -97,7 +87,8 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
         }),
       );
       item = result.Item as Record<string, unknown> | undefined;
-    } catch {
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
       return undefined;
     }
 
@@ -196,8 +187,17 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
         }
       };
 
+      let isPolling = false;
+
       const pollHandle = setInterval(() => {
-        void poll();
+        if (isPolling) {
+          return;
+        }
+
+        isPolling = true;
+        void poll().finally(() => {
+          isPolling = false;
+        });
       }, this.pollIntervalMs);
 
       if (typeof pollHandle.unref === 'function') {
@@ -295,6 +295,7 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
 
       return { jobId: candidateJobId, isOwner: true };
     } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
       // ConditionalCheckFailedException means a pending job already exists
       if (
         error &&
@@ -350,34 +351,45 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
     const pk = `DEDUPE#${hash}`;
 
     // Check if already completed to prevent double completion
-    const existing = await this.docClient.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: { pk, sk: pk },
-      }),
-    );
+    let existing;
+    try {
+      existing = await this.docClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: { pk, sk: pk },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     if (existing.Item && existing.Item['status'] === 'completed') {
       return;
     }
 
-    await this.docClient.send(
-      new UpdateCommand({
-        TableName: this.tableName,
-        Key: { pk, sk: pk },
-        UpdateExpression:
-          'SET #status = :completed, #result = :result, updatedAt = :now',
-        ExpressionAttributeNames: {
-          '#status': 'status',
-          '#result': 'result',
-        },
-        ExpressionAttributeValues: {
-          ':completed': 'completed',
-          ':result': serializedResult,
-          ':now': Date.now(),
-        },
-      }),
-    );
+    try {
+      await this.docClient.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: { pk, sk: pk },
+          UpdateExpression:
+            'SET #status = :completed, #result = :result, updatedAt = :now',
+          ExpressionAttributeNames: {
+            '#status': 'status',
+            '#result': 'result',
+          },
+          ExpressionAttributeValues: {
+            ':completed': 'completed',
+            ':result': serializedResult,
+            ':now': Date.now(),
+          },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     // Resolve any waiting promises in this process immediately
     const settle = this.jobSettlers.get(hash);
@@ -395,23 +407,28 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
 
     const pk = `DEDUPE#${hash}`;
 
-    await this.docClient.send(
-      new UpdateCommand({
-        TableName: this.tableName,
-        Key: { pk, sk: pk },
-        UpdateExpression:
-          'SET #status = :failed, #error = :error, updatedAt = :now',
-        ExpressionAttributeNames: {
-          '#status': 'status',
-          '#error': 'error',
-        },
-        ExpressionAttributeValues: {
-          ':failed': 'failed',
-          ':error': error.message,
-          ':now': Date.now(),
-        },
-      }),
-    );
+    try {
+      await this.docClient.send(
+        new UpdateCommand({
+          TableName: this.tableName,
+          Key: { pk, sk: pk },
+          UpdateExpression:
+            'SET #status = :failed, #error = :error, updatedAt = :now',
+          ExpressionAttributeNames: {
+            '#status': 'status',
+            '#error': 'error',
+          },
+          ExpressionAttributeValues: {
+            ':failed': 'failed',
+            ':error': 'Job failed',
+            ':now': Date.now(),
+          },
+        }),
+      );
+    } catch (dynamoError: unknown) {
+      throwIfDynamoTableMissing(dynamoError, this.tableName);
+      throw dynamoError;
+    }
 
     // Resolve waiters to undefined on failure
     const settle = this.jobSettlers.get(hash);
@@ -429,12 +446,18 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
 
     const pk = `DEDUPE#${hash}`;
 
-    const result = await this.docClient.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: { pk, sk: pk },
-      }),
-    );
+    let result;
+    try {
+      result = await this.docClient.send(
+        new GetCommand({
+          TableName: this.tableName,
+          Key: { pk, sk: pk },
+        }),
+      );
+    } catch (error: unknown) {
+      throwIfDynamoTableMissing(error, this.tableName);
+      throw error;
+    }
 
     if (!result.Item) {
       return false;
@@ -463,31 +486,33 @@ export class DynamoDBDedupeStore<T = unknown> implements DedupeStore<T> {
     let lastEvaluatedKey: Record<string, unknown> | undefined;
 
     do {
-      const scanResult = await this.docClient.send(
-        new ScanCommand({
-          TableName: this.tableName,
-          FilterExpression: 'begins_with(pk, :prefix)',
-          ExpressionAttributeValues: { ':prefix': 'DEDUPE#' },
-          ProjectionExpression: 'pk, sk',
-          ExclusiveStartKey: lastEvaluatedKey,
-        }),
-      );
+      let scanResult;
+      try {
+        scanResult = await this.docClient.send(
+          new ScanCommand({
+            TableName: this.tableName,
+            FilterExpression: 'begins_with(pk, :prefix)',
+            ExpressionAttributeValues: { ':prefix': 'DEDUPE#' },
+            ProjectionExpression: 'pk, sk',
+            ExclusiveStartKey: lastEvaluatedKey,
+          }),
+        );
+      } catch (error: unknown) {
+        throwIfDynamoTableMissing(error, this.tableName);
+        throw error;
+      }
 
       const items = scanResult.Items ?? [];
       if (items.length > 0) {
-        for (let i = 0; i < items.length; i += 25) {
-          const batch = items.slice(i, i + 25);
-          await this.docClient.send(
-            new BatchWriteCommand({
-              RequestItems: {
-                [this.tableName]: batch.map((item) => ({
-                  DeleteRequest: {
-                    Key: { pk: item['pk'], sk: item['sk'] },
-                  },
-                })),
-              },
-            }),
+        try {
+          await batchDeleteWithRetries(
+            this.docClient,
+            this.tableName,
+            items.map((item) => ({ pk: item['pk'], sk: item['sk'] })),
           );
+        } catch (error: unknown) {
+          throwIfDynamoTableMissing(error, this.tableName);
+          throw error;
         }
       }
 
