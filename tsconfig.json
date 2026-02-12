@@ -25,6 +25,7 @@
     { "path": "./packages/vitest-config/tsconfig.json" },
     { "path": "./packages/core/tsconfig.json" },
     { "path": "./packages/store-memory/tsconfig.json" },
-    { "path": "./packages/store-sqlite/tsconfig.json" }
+    { "path": "./packages/store-sqlite/tsconfig.json" },
+    { "path": "./packages/store-dynamodb/tsconfig.json" }
   ]
 }

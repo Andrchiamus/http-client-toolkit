@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/@changesets/config@3.1.2/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [["@http-client-toolkit/core", "@http-client-toolkit/store-memory", "@http-client-toolkit/store-sqlite"]],
+  "fixed": [["@http-client-toolkit/core", "@http-client-toolkit/store-memory", "@http-client-toolkit/store-sqlite", "@http-client-toolkit/store-dynamodb"]],
   "linked": [],
   "access": "public",
   "baseBranch": "main",
