@@ -115,8 +115,9 @@ export interface HttpClientOptions {
    */
   maxWaitTime?: number;
   /**
-   * Optional response transformer applied to the raw response data.
-   * Use this for converting snake_case to camelCase, etc.
+   * Transforms parsed response data before caching and further processing.
+   * Runs on every response (cache miss or revalidation). Use this for
+   * structural mapping like converting snake_case keys to camelCase.
    */
   responseTransformer?: (data: unknown) => unknown;
   /**
@@ -126,9 +127,11 @@ export interface HttpClientOptions {
    */
   errorHandler?: (context: HttpErrorContext) => Error;
   /**
-   * Optional response validator/handler called after transformation.
-   * Use this to inspect the response and throw domain-specific errors
-   * based on response content (e.g., API-level error codes).
+   * Post-transformation hook for validation or domain-level error detection.
+   * Runs after `responseTransformer` on the final data. Throw to reject
+   * responses that are technically 2xx but contain application-level errors
+   * (e.g. `{ error_code: 404 }` inside a 200 response). The return value
+   * replaces the response data.
    */
   responseHandler?: (data: unknown) => unknown;
   /**
@@ -169,10 +172,20 @@ interface ParsedResponseBody {
 }
 
 export interface HttpErrorContext {
+  /** Human-readable description, e.g. `"Request failed with status 404"`. */
   message: string;
+  /** The URL that was requested. */
+  url: string;
   response: {
+    /** HTTP status code (e.g. 404, 500). */
     status: number;
+    /**
+     * Parsed response body. `undefined` for empty bodies and 204/205 responses.
+     * JSON responses are parsed into objects/arrays; non-JSON bodies are returned
+     * as raw strings.
+     */
     data: unknown;
+    /** Response headers. */
     headers: Headers;
   };
 }
@@ -689,6 +702,7 @@ export class HttpClient implements HttpClientContract {
     return (
       err != null &&
       typeof err === 'object' &&
+      'url' in err &&
       'response' in err &&
       typeof (err as HttpErrorContext).response?.status === 'number'
     );
@@ -702,7 +716,10 @@ export class HttpClient implements HttpClientContract {
     const message = bodyMessage
       ? `${ctx.message}, ${bodyMessage}`
       : ctx.message;
-    return new HttpClientError(message, ctx.response.status);
+    return new HttpClientError(message, ctx.response.status, {
+      data: ctx.response.data,
+      headers: ctx.response.headers,
+    });
   }
 
   private async parseResponseBody(
@@ -914,6 +931,7 @@ export class HttpClient implements HttpClientContract {
       if (!response.ok) {
         const error: HttpErrorContext = {
           message: `Request failed with status ${response.status}`,
+          url,
           response: {
             status: response.status,
             data: parsedBody.data,
