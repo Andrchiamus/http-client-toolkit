@@ -75,17 +75,15 @@ The response pipeline runs **before** the result is cached. This means cached en
 
 ## Error Handler
 
-Use `errorHandler` to convert errors from the pipeline (or from the HTTP request itself) into domain-specific types:
+Use `errorHandler` to convert HTTP errors (non-2xx responses) into domain-specific types. Note that `errorHandler` is only called for HTTP errors — errors thrown by `responseTransformer` or `responseHandler` (e.g. validation failures) are wrapped in `HttpClientError` directly.
 
 ```typescript
 const client = new HttpClient(stores, {
   responseTransformer: (data) => transform(data),
   responseHandler: (data) => validate(data),
-  errorHandler: (error) => {
-    if (error instanceof z.ZodError) {
-      return new ValidationError('Invalid API response', error.issues);
-    }
-    return error instanceof Error ? error : new Error(String(error));
+  errorHandler: (context) => {
+    // Only called for non-2xx HTTP responses
+    return new ApiError(context.message, context.response.status);
   },
 });
 ```

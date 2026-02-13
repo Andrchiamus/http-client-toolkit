@@ -27,9 +27,13 @@ try {
 
 ## Custom Error Handler
 
-Use `errorHandler` to convert errors into your own domain types:
+Use `errorHandler` to convert HTTP errors into your own domain types. The handler receives a typed `HttpErrorContext` with the response status, parsed body, and headers — no casting required.
+
+`errorHandler` is only called for HTTP errors (non-2xx responses). Network failures and other non-HTTP errors are always wrapped in `HttpClientError` by the toolkit.
 
 ```typescript
+import { HttpClient, type HttpErrorContext } from '@http-client-toolkit/core';
+
 class NotFoundError extends Error {
   constructor(message: string) {
     super(message);
@@ -40,7 +44,7 @@ class NotFoundError extends Error {
 class ApiError extends Error {
   constructor(
     message: string,
-    public statusCode?: number,
+    public statusCode: number,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -48,14 +52,18 @@ class ApiError extends Error {
 }
 
 const client = new HttpClient(stores, {
-  errorHandler: (error) => {
-    if (error instanceof HttpClientError) {
-      if (error.statusCode === 404) {
-        return new NotFoundError('Resource not found');
-      }
-      return new ApiError(error.message, error.statusCode);
+  errorHandler: (context) => {
+    if (context.response.status === 404) {
+      return new NotFoundError('Resource not found');
     }
-    return error instanceof Error ? error : new Error(String(error));
+    const bodyMessage =
+      typeof context.response.data === 'object' && context.response.data !== null
+        ? (context.response.data as { message?: string }).message
+        : undefined;
+    return new ApiError(
+      bodyMessage ?? context.message,
+      context.response.status,
+    );
   },
 });
 ```

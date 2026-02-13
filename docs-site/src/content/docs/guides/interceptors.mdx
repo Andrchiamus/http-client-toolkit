@@ -188,7 +188,7 @@ Interceptors **do** run during background revalidation (`stale-while-revalidate`
 
 ## Error Handling
 
-Errors thrown by interceptors propagate through the normal error pipeline. If an `errorHandler` is configured, it will receive the interceptor error. Otherwise, a standard `HttpClientError` is thrown.
+Errors thrown by interceptors are wrapped in `HttpClientError` and propagate normally. Note that `errorHandler` is **not** called for interceptor errors — it only handles HTTP errors (non-2xx responses). Interceptor errors are non-HTTP errors and are always wrapped by the toolkit.
 
 ```typescript
 const client = new HttpClient(stores, {
@@ -201,9 +201,14 @@ const client = new HttpClient(stores, {
     headers.set('Authorization', `Bearer ${token}`);
     return { ...init, headers };
   },
-  errorHandler: (error) => {
-    // Interceptor errors arrive here too
-    return new AppError(error instanceof Error ? error.message : String(error));
-  },
 });
+
+// Interceptor errors surface as HttpClientError
+try {
+  await client.get(url);
+} catch (error) {
+  if (error instanceof HttpClientError) {
+    console.log(error.message); // "No access token available"
+  }
+}
 ```

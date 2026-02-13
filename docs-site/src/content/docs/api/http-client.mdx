@@ -40,7 +40,7 @@ All stores are optional. Pass only the ones you need.
 | `maxWaitTime` | `number` | `60000` | Max wait time in ms before throwing |
 | `responseTransformer` | `(data: unknown) => unknown` | — | Transform raw response data |
 | `responseHandler` | `(data: unknown) => unknown` | — | Validate/process transformed data |
-| `errorHandler` | `(error: unknown) => Error` | — | Convert errors to domain-specific types |
+| `errorHandler` | `(context: HttpErrorContext) => Error` | — | Convert HTTP errors to domain-specific types (not called for network failures) |
 | `rateLimitHeaders` | `RateLimitHeaderConfig` | defaults | Configure standard/custom header names |
 | `cacheOverrides` | `object` | — | Override specific cache header behaviors (see below) |
 
