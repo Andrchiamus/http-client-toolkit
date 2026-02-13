@@ -38,9 +38,9 @@ All stores are optional. Pass only the ones you need.
 | `defaultCacheTTL` | `number` | `3600` | Cache TTL in seconds |
 | `throwOnRateLimit` | `boolean` | `true` | Throw when rate limited vs. wait |
 | `maxWaitTime` | `number` | `60000` | Max wait time in ms before throwing |
-| `responseTransformer` | `(data: unknown) => unknown` | — | Transform raw response data |
-| `responseHandler` | `(data: unknown) => unknown` | — | Validate/process transformed data |
-| `errorHandler` | `(context: HttpErrorContext) => Error` | — | Convert HTTP errors to domain-specific types (not called for network failures) |
+| `responseTransformer` | `(data: unknown) => unknown` | — | Transform parsed response data before caching (e.g. snake_case to camelCase) |
+| `responseHandler` | `(data: unknown) => unknown` | — | Post-transformation hook for validation or domain-level error detection. Throw to reject 2xx responses with application-level errors |
+| `errorHandler` | `(context: HttpErrorContext) => Error` | — | Convert HTTP errors to domain-specific types. Context includes `url`, response `status`, parsed `data`, and `headers`. Not called for network failures |
 | `rateLimitHeaders` | `RateLimitHeaderConfig` | defaults | Configure standard/custom header names |
 | `cacheOverrides` | `object` | — | Override specific cache header behaviors (see below) |
 

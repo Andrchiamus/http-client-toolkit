@@ -21,6 +21,8 @@ try {
   if (error instanceof HttpClientError) {
     console.log(error.message);    // Error description
     console.log(error.statusCode); // HTTP status code (e.g. 404, 500)
+    console.log(error.data);       // Parsed response body (if any)
+    console.log(error.headers);    // Response headers
   }
 }
 ```
@@ -53,6 +55,8 @@ class ApiError extends Error {
 
 const client = new HttpClient(stores, {
   errorHandler: (context) => {
+    console.error(`Request to ${context.url} failed`);
+
     if (context.response.status === 404) {
       return new NotFoundError('Resource not found');
     }
