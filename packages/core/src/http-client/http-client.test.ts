@@ -100,18 +100,17 @@ describe('HttpClient', () => {
     const client = new HttpClient(
       {},
       {
-        errorHandler: (error) => {
+        errorHandler: (context) => {
           invocations += 1;
-          const response = (
-            error as { response?: { status?: number; data?: unknown } }
-          ).response;
+          // context is now typed — no casting needed
           const bodyMessage =
-            typeof response?.data === 'object' && response.data !== null
-              ? (response.data as { message?: unknown }).message
+            typeof context.response.data === 'object' &&
+            context.response.data !== null
+              ? (context.response.data as { message?: string }).message
               : undefined;
 
           return new CustomError(
-            `status=${response?.status}; message=${typeof bodyMessage === 'string' ? bodyMessage : 'n/a'}`,
+            `status=${context.response.status}; message=${bodyMessage ?? 'n/a'}`,
           );
         },
       },
@@ -121,6 +120,24 @@ describe('HttpClient', () => {
       /status=429; message=Too many requests/,
     );
     expect(invocations).toBe(1);
+  });
+
+  test('should not call errorHandler for network errors', async () => {
+    const errorHandler = vi.fn(() => new Error('should not be called'));
+    const client = new HttpClient(
+      {},
+      {
+        fetchFn: async () => {
+          throw new TypeError('fetch failed');
+        },
+        errorHandler,
+      },
+    );
+
+    await expect(client.get('http://example.com/fail')).rejects.toThrow(
+      HttpClientError,
+    );
+    expect(errorHandler).not.toHaveBeenCalled();
   });
 
   test('should throw HttpClientError on HTTP errors by default', async () => {
@@ -728,35 +745,42 @@ describe('HttpClient', () => {
     expect(calls.fail).toBe(1);
   });
 
-  test('should wrap HttpClientError input in generateClientError unchanged', () => {
+  test('should wrap Error in HttpClientError via generateClientError', () => {
     const client = new HttpClient() as unknown as {
       generateClientError: (err: unknown) => Error;
     };
 
-    const original = new HttpClientError('already processed', 409);
-    expect(client.generateClientError(original)).toBe(original);
+    const result = client.generateClientError(new Error('network failure'));
+    expect(result).toBeInstanceOf(HttpClientError);
+    expect(result.message).toBe('network failure');
   });
 
-  test('should handle non-Error object with message in generateClientError', () => {
+  test('should wrap HttpErrorContext in HttpClientError with status via generateClientError', () => {
     const client = new HttpClient() as unknown as {
       generateClientError: (err: unknown) => Error;
     };
 
     const result = client.generateClientError({
-      message: 'plain object error',
+      message: 'Request failed with status 404',
+      response: {
+        status: 404,
+        data: { message: 'Not found' },
+        headers: new Headers(),
+      },
     });
     expect(result).toBeInstanceOf(HttpClientError);
-    expect(result.message).toContain('plain object error');
+    expect((result as HttpClientError).statusCode).toBe(404);
+    expect(result.message).toContain('Not found');
   });
 
-  test('should handle non-Error non-message value in generateClientError', () => {
+  test('should stringify non-Error non-HttpErrorContext values in generateClientError', () => {
     const client = new HttpClient() as unknown as {
       generateClientError: (err: unknown) => Error;
     };
 
     const result = client.generateClientError(42);
     expect(result).toBeInstanceOf(HttpClientError);
-    expect(result.message).toContain('Unknown error');
+    expect(result.message).toBe('42');
   });
 
   test('should exercise private header parsing helpers', () => {
@@ -1728,20 +1752,31 @@ describe('HttpClient', () => {
     });
 
     test('isServerErrorOrNetworkFailure helper covers branches', () => {
-      const client = new HttpClient();
-      const helper = (
-        client as unknown as {
-          isServerErrorOrNetworkFailure: (error: unknown) => boolean;
-        }
-      ).isServerErrorOrNetworkFailure;
+      const client = new HttpClient() as unknown as {
+        isServerErrorOrNetworkFailure: (error: unknown) => boolean;
+      };
 
-      expect(helper({ response: { status: 500 } })).toBe(true);
-      expect(helper({ response: { status: 503 } })).toBe(true);
-      expect(helper({ response: { status: 400 } })).toBe(false);
-      expect(helper(new TypeError('fetch failed'))).toBe(true);
-      expect(helper(new Error('other'))).toBe(false);
-      expect(helper('string error')).toBe(false);
-      expect(helper({ response: { status: 'not-a-number' } })).toBe(false);
+      expect(
+        client.isServerErrorOrNetworkFailure({ response: { status: 500 } }),
+      ).toBe(true);
+      expect(
+        client.isServerErrorOrNetworkFailure({ response: { status: 503 } }),
+      ).toBe(true);
+      expect(
+        client.isServerErrorOrNetworkFailure({ response: { status: 400 } }),
+      ).toBe(false);
+      expect(
+        client.isServerErrorOrNetworkFailure(new TypeError('fetch failed')),
+      ).toBe(true);
+      expect(client.isServerErrorOrNetworkFailure(new Error('other'))).toBe(
+        false,
+      );
+      expect(client.isServerErrorOrNetworkFailure('string error')).toBe(false);
+      expect(
+        client.isServerErrorOrNetworkFailure({
+          response: { status: 'not-a-number' },
+        }),
+      ).toBe(false);
     });
 
     test('Vary match returns cached value', async () => {
