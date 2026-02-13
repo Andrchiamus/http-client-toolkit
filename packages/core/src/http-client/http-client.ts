@@ -120,10 +120,11 @@ export interface HttpClientOptions {
    */
   responseTransformer?: (data: unknown) => unknown;
   /**
-   * Optional error handler to convert errors into domain-specific error types.
+   * Optional error handler to convert HTTP errors into domain-specific error types.
+   * Only called for HTTP errors (non-2xx responses), not for network failures.
    * If not provided, a generic HttpClientError is thrown.
    */
-  errorHandler?: (error: unknown) => Error;
+  errorHandler?: (context: HttpErrorContext) => Error;
   /**
    * Optional response validator/handler called after transformation.
    * Use this to inspect the response and throw domain-specific errors
@@ -167,14 +168,14 @@ interface ParsedResponseBody {
   data: unknown;
 }
 
-type ErrorWithResponse = {
+export interface HttpErrorContext {
   message: string;
   response: {
     status: number;
     data: unknown;
     headers: Headers;
   };
-};
+}
 
 export class HttpClient implements HttpClientContract {
   private stores: HttpClientStores;
@@ -661,49 +662,47 @@ export class HttpClient implements HttpClientContract {
   }
 
   private isServerErrorOrNetworkFailure(error: unknown): boolean {
-    if (typeof error === 'object' && error !== null && 'response' in error) {
-      const status = (error as ErrorWithResponse).response?.status;
-      if (typeof status === 'number' && status >= 500) return true;
+    if (this.isHttpErrorContext(error)) {
+      if (error.response.status >= 500) return true;
     }
     if (error instanceof TypeError) return true;
     return false;
   }
 
   private generateClientError(err: unknown): Error {
-    // If a custom error handler is provided, use it
-    if (this.options.errorHandler) {
-      return this.options.errorHandler(err);
+    // HTTP errors: the consumer classifies these
+    if (this.isHttpErrorContext(err)) {
+      if (this.options.errorHandler) {
+        return this.options.errorHandler(err);
+      }
+      return this.defaultHttpError(err);
     }
 
-    if (err instanceof HttpClientError) {
-      return err;
+    // Non-HTTP errors (network failures, unexpected throws): toolkit owns these
+    if (err instanceof Error) {
+      return new HttpClientError(err.message);
     }
+    return new HttpClientError(String(err));
+  }
 
-    const responseError = err as Partial<ErrorWithResponse>;
-    const statusCode =
-      typeof responseError.response?.status === 'number'
-        ? responseError.response.status
+  private isHttpErrorContext(err: unknown): err is HttpErrorContext {
+    return (
+      err != null &&
+      typeof err === 'object' &&
+      'response' in err &&
+      typeof (err as HttpErrorContext).response?.status === 'number'
+    );
+  }
+
+  private defaultHttpError(ctx: HttpErrorContext): HttpClientError {
+    const bodyMessage =
+      typeof ctx.response.data === 'object' && ctx.response.data !== null
+        ? (ctx.response.data as { message?: string }).message
         : undefined;
-
-    const responseData = responseError.response?.data;
-    const derivedResponseMessage =
-      typeof responseData === 'object' && responseData !== null
-        ? (responseData as { message?: unknown }).message
-        : undefined;
-    const responseMessage =
-      typeof derivedResponseMessage === 'string'
-        ? derivedResponseMessage
-        : undefined;
-
-    const errorMessage =
-      err instanceof Error
-        ? err.message
-        : typeof (err as { message?: unknown }).message === 'string'
-          ? (err as { message: string }).message
-          : 'Unknown error';
-    const message = `${errorMessage}${responseMessage ? `, ${responseMessage}` : ''}`;
-
-    return new HttpClientError(message, statusCode);
+    const message = bodyMessage
+      ? `${ctx.message}, ${bodyMessage}`
+      : ctx.message;
+    return new HttpClientError(message, ctx.response.status);
   }
 
   private async parseResponseBody(
@@ -913,7 +912,7 @@ export class HttpClient implements HttpClientContract {
       const parsedBody = await this.parseResponseBody(response);
 
       if (!response.ok) {
-        const error: ErrorWithResponse = {
+        const error: HttpErrorContext = {
           message: `Request failed with status ${response.status}`,
           response: {
             status: response.status,
