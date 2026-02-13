@@ -97,11 +97,13 @@ describe('HttpClient', () => {
     }
 
     let invocations = 0;
+    let capturedUrl: string | undefined;
     const client = new HttpClient(
       {},
       {
         errorHandler: (context) => {
           invocations += 1;
+          capturedUrl = context.url;
           // context is now typed — no casting needed
           const bodyMessage =
             typeof context.response.data === 'object' &&
@@ -120,6 +122,7 @@ describe('HttpClient', () => {
       /status=429; message=Too many requests/,
     );
     expect(invocations).toBe(1);
+    expect(capturedUrl).toBe(`${baseUrl}/rate-limited`);
   });
 
   test('should not call errorHandler for network errors', async () => {
@@ -159,6 +162,27 @@ describe('HttpClient', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(HttpClientError);
       expect((error as HttpClientError).statusCode).toBe(404);
+    }
+  });
+
+  test('should include data and headers on default HttpClientError', async () => {
+    nock(baseUrl)
+      .get('/error-with-body')
+      .reply(422, { message: 'Validation failed', errors: ['field required'] });
+
+    try {
+      await httpClient.get(`${baseUrl}/error-with-body`);
+      expect.unreachable('Should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(HttpClientError);
+      const httpError = error as HttpClientError;
+      expect(httpError.statusCode).toBe(422);
+      expect(httpError.data).toEqual({
+        message: 'Validation failed',
+        errors: ['field required'],
+      });
+      expect(httpError.headers).toBeInstanceOf(Headers);
+      expect(httpError.message).toContain('Validation failed');
     }
   });
 
@@ -760,17 +784,22 @@ describe('HttpClient', () => {
       generateClientError: (err: unknown) => Error;
     };
 
+    const responseHeaders = new Headers({ 'x-request-id': 'abc123' });
     const result = client.generateClientError({
       message: 'Request failed with status 404',
+      url: `${baseUrl}/missing`,
       response: {
         status: 404,
         data: { message: 'Not found' },
-        headers: new Headers(),
+        headers: responseHeaders,
       },
     });
     expect(result).toBeInstanceOf(HttpClientError);
-    expect((result as HttpClientError).statusCode).toBe(404);
-    expect(result.message).toContain('Not found');
+    const httpError = result as HttpClientError;
+    expect(httpError.statusCode).toBe(404);
+    expect(httpError.message).toContain('Not found');
+    expect(httpError.data).toEqual({ message: 'Not found' });
+    expect(httpError.headers).toBe(responseHeaders);
   });
 
   test('should stringify non-Error non-HttpErrorContext values in generateClientError', () => {
@@ -1757,13 +1786,22 @@ describe('HttpClient', () => {
       };
 
       expect(
-        client.isServerErrorOrNetworkFailure({ response: { status: 500 } }),
+        client.isServerErrorOrNetworkFailure({
+          url: `${baseUrl}/err`,
+          response: { status: 500 },
+        }),
       ).toBe(true);
       expect(
-        client.isServerErrorOrNetworkFailure({ response: { status: 503 } }),
+        client.isServerErrorOrNetworkFailure({
+          url: `${baseUrl}/err`,
+          response: { status: 503 },
+        }),
       ).toBe(true);
       expect(
-        client.isServerErrorOrNetworkFailure({ response: { status: 400 } }),
+        client.isServerErrorOrNetworkFailure({
+          url: `${baseUrl}/err`,
+          response: { status: 400 },
+        }),
       ).toBe(false);
       expect(
         client.isServerErrorOrNetworkFailure(new TypeError('fetch failed')),
@@ -1774,7 +1812,14 @@ describe('HttpClient', () => {
       expect(client.isServerErrorOrNetworkFailure('string error')).toBe(false);
       expect(
         client.isServerErrorOrNetworkFailure({
+          url: `${baseUrl}/err`,
           response: { status: 'not-a-number' },
+        }),
+      ).toBe(false);
+      // Missing url field — should not match HttpErrorContext
+      expect(
+        client.isServerErrorOrNetworkFailure({
+          response: { status: 500 },
         }),
       ).toBe(false);
     });
