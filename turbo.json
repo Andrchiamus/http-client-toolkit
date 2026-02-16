@@ -22,6 +22,7 @@
       "outputs": ["coverage/**"]
     },
     "@http-client-toolkit/store-dynamodb#test": {
+      "dependsOn": ["^build", "@repo/vitest-config#build"],
       "outputs": []
     },
     "test:run": {
