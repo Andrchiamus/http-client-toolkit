@@ -1,0 +1,129 @@
+---
+title: Retries
+description: Configure automatic retries with exponential backoff for transient failures
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+HTTP Client Toolkit supports opt-in automatic retries with exponential backoff and jitter for transient failures. Retries are **disabled by default** — pass a `retry` option to enable them.
+
+## Default Retryable Conditions
+
+When retries are enabled, these failures are automatically retried:
+
+| Condition | Description |
+|-----------|-------------|
+| `429` | Too Many Requests (rate limited) |
+| `500` | Internal Server Error |
+| `502` | Bad Gateway |
+| `503` | Service Unavailable |
+| `504` | Gateway Timeout |
+| `TypeError` | Network failures (DNS, connection refused, etc.) |
+
+Client errors (`400`, `401`, `403`, `404`, `422`) are **not** retried by default.
+
+## Basic Configuration
+
+<Tabs>
+  <TabItem label="Constructor">
+    ```typescript
+    import { HttpClient } from '@http-client-toolkit/core';
+
+    const client = new HttpClient(stores, {
+      retry: {
+        maxRetries: 3,    // Up to 3 retry attempts (4 total requests)
+        baseDelay: 1000,  // 1 second initial delay
+        maxDelay: 30000,  // Cap delay at 30 seconds
+        jitter: 'full',   // Randomize delays to avoid thundering herd
+      },
+    });
+    ```
+  </TabItem>
+  <TabItem label="Per-Request">
+    ```typescript
+    // Override constructor defaults for a specific request
+    const data = await client.get(url, {
+      retry: { maxRetries: 5, baseDelay: 500 },
+    });
+
+    // Disable retries for a single request
+    const data = await client.get(url, { retry: false });
+    ```
+  </TabItem>
+</Tabs>
+
+## Backoff Strategy
+
+Retry delays use **exponential backoff**: each attempt doubles the delay from `baseDelay`, capped at `maxDelay`.
+
+With `jitter: 'full'` (default), the actual delay is randomized between 0 and the calculated backoff. This prevents multiple clients from retrying in sync (thundering herd).
+
+With `jitter: 'none'`, delays are deterministic:
+
+| Attempt | Delay (`baseDelay: 1000`) |
+|---------|---------------------------|
+| 1 | 1000 ms |
+| 2 | 2000 ms |
+| 3 | 4000 ms |
+| 4 | 8000 ms |
+
+When a `429` response includes a `Retry-After` header, the server's hint is used as a floor — the delay is `max(backoff, retryAfterMs)`.
+
+## Custom Retry Condition
+
+Override the default retry logic with `retryCondition`:
+
+```typescript
+const client = new HttpClient(stores, {
+  retry: {
+    retryCondition: (context, attempt) => {
+      // Retry 404s (not retried by default)
+      if (context.statusCode === 404) return true;
+      // Stop retrying 500s after 2 attempts
+      if (context.statusCode === 500 && attempt > 2) return false;
+      // Fall back to default for everything else
+      return [429, 500, 502, 503, 504].includes(context.statusCode ?? 0);
+    },
+  },
+});
+```
+
+## Retry Callback
+
+Use `onRetry` to log or track retry attempts:
+
+```typescript
+const client = new HttpClient(stores, {
+  retry: {
+    onRetry: (context, attempt, delay) => {
+      console.warn(
+        `Retry ${attempt} for ${context.url} (status ${context.statusCode}) in ${delay}ms`,
+      );
+    },
+  },
+});
+```
+
+## Disabling Retries
+
+```typescript
+// Globally disabled
+const client = new HttpClient(stores, { retry: false });
+
+// Per-request disabled (even if constructor enables retries)
+const data = await client.get(url, { retry: false });
+```
+
+## Interaction with Other Features
+
+**Cache**: Retries happen after a cache miss. Cached responses are never retried.
+
+**Deduplication**: Retries occur within the dedup ownership — joiners wait for the final result (success or failure after all retries).
+
+**Rate Limiting**: Store-based rate limiting and server cooldowns are enforced before the retry loop begins. The `Retry-After` header from 429 responses is respected within the retry delay calculation.
+
+**Stale-if-error**: If all retries are exhausted and a stale cache entry exists with `stale-if-error`, the stale value is returned as a fallback.
+
+**Interceptors**: Both `requestInterceptor` and `responseInterceptor` run on every attempt, so refreshed auth tokens are picked up automatically.
+
+**AbortSignal**: Aborting the signal cancels both the current fetch and any pending retry delay.

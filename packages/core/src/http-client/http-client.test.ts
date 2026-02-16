@@ -10,7 +10,12 @@ const alternateBaseUrl = 'https://api-alt.example.com';
 describe('HttpClient', () => {
   let httpClient: HttpClient;
   beforeEach(() => {
+    nock.cleanAll();
     httpClient = new HttpClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   test('should return a successful response', async () => {
@@ -2534,6 +2539,720 @@ describe('HttpClient', () => {
       await client.flushRevalidations();
 
       expect(bgFetchCalled).toBe(true);
+    });
+  });
+
+  describe('retry', () => {
+    describe('basic retry behavior', () => {
+      test('retries on 500 and succeeds on next attempt', async () => {
+        nock(baseUrl)
+          .get('/retry-500')
+          .reply(500, { message: 'Internal Server Error' })
+          .get('/retry-500')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          { retry: { jitter: 'none', baseDelay: 1 } },
+        );
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/retry-500`,
+        );
+        expect(result).toEqual({ ok: true });
+      });
+
+      test('retries on 502', async () => {
+        nock(baseUrl)
+          .get('/retry-502')
+          .reply(502, { message: 'Bad Gateway' })
+          .get('/retry-502')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          { retry: { jitter: 'none', baseDelay: 1 } },
+        );
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/retry-502`,
+        );
+        expect(result).toEqual({ ok: true });
+      });
+
+      test('retries on 503', async () => {
+        nock(baseUrl)
+          .get('/retry-503')
+          .reply(
+            503,
+            { message: 'Service Unavailable' },
+            { 'Retry-After': '0' },
+          )
+          .get('/retry-503')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          { retry: { jitter: 'none', baseDelay: 1 } },
+        );
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/retry-503`,
+        );
+        expect(result).toEqual({ ok: true });
+      });
+
+      test('retries on 504', async () => {
+        nock(baseUrl)
+          .get('/retry-504')
+          .reply(504, { message: 'Gateway Timeout' })
+          .get('/retry-504')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          { retry: { jitter: 'none', baseDelay: 1 } },
+        );
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/retry-504`,
+        );
+        expect(result).toEqual({ ok: true });
+      });
+
+      test('retries on network TypeError and succeeds', async () => {
+        let callCount = 0;
+        const retryCalls: Array<{ url: string; attempt: number }> = [];
+        const client = new HttpClient(
+          {},
+          {
+            fetchFn: async () => {
+              callCount += 1;
+              if (callCount === 1) {
+                throw new TypeError('fetch failed');
+              }
+              return new Response(JSON.stringify({ ok: true }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+              });
+            },
+            retry: {
+              jitter: 'none',
+              baseDelay: 1,
+              onRetry: (ctx, attempt) => {
+                retryCalls.push({ url: ctx.url, attempt });
+              },
+            },
+          },
+        );
+
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/retry-network`,
+        );
+        expect(result).toEqual({ ok: true });
+        expect(callCount).toBe(2);
+        expect(retryCalls).toHaveLength(1);
+        expect(retryCalls[0].url).toBe(`${baseUrl}/retry-network`);
+        expect(retryCalls[0].attempt).toBe(1);
+      });
+
+      test('retries on 429 and respects Retry-After header', async () => {
+        nock(baseUrl)
+          .get('/retry-429')
+          .reply(429, { message: 'Too many requests' }, { 'Retry-After': '0' })
+          .get('/retry-429')
+          .reply(200, { ok: true });
+
+        const delays: Array<number> = [];
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              jitter: 'none',
+              baseDelay: 1,
+              onRetry: (_ctx, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          },
+        );
+
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/retry-429`,
+        );
+        expect(result).toEqual({ ok: true });
+        expect(delays).toHaveLength(1);
+      });
+    });
+
+    describe('non-retryable errors', () => {
+      test.each([400, 401, 403, 404, 422])(
+        'does NOT retry %i status',
+        async (status) => {
+          nock(baseUrl).get('/no-retry').reply(status, { message: 'Error' });
+
+          const onRetry = vi.fn();
+          const client = new HttpClient(
+            {},
+            { retry: { onRetry, baseDelay: 1 } },
+          );
+
+          await expect(client.get(`${baseUrl}/no-retry`)).rejects.toThrow(
+            HttpClientError,
+          );
+          expect(onRetry).not.toHaveBeenCalled();
+        },
+      );
+
+      test('does NOT retry AbortError', async () => {
+        const controller = new AbortController();
+        controller.abort();
+
+        const client = new HttpClient(
+          {},
+          {
+            retry: { baseDelay: 1 },
+          },
+        );
+
+        await expect(
+          client.get(`${baseUrl}/abort-retry`, {
+            signal: controller.signal,
+          }),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+      });
+    });
+
+    describe('configuration', () => {
+      test('maxRetries honored — gives up after N attempts', async () => {
+        nock(baseUrl)
+          .get('/max-retries')
+          .times(3)
+          .reply(500, { message: 'fail' });
+
+        const client = new HttpClient(
+          {},
+          { retry: { maxRetries: 2, jitter: 'none', baseDelay: 1 } },
+        );
+
+        await expect(client.get(`${baseUrl}/max-retries`)).rejects.toThrow(
+          HttpClientError,
+        );
+      });
+
+      test('maxRetries: 0 disables retries', async () => {
+        nock(baseUrl).get('/no-retries').reply(500, { message: 'fail' });
+
+        const onRetry = vi.fn();
+        const client = new HttpClient(
+          {},
+          { retry: { maxRetries: 0, onRetry } },
+        );
+
+        await expect(client.get(`${baseUrl}/no-retries`)).rejects.toThrow(
+          HttpClientError,
+        );
+        expect(onRetry).not.toHaveBeenCalled();
+      });
+
+      test('constructor-level defaults used when no per-request override', async () => {
+        nock(baseUrl)
+          .get('/ctor-defaults')
+          .reply(500, { message: 'fail' })
+          .get('/ctor-defaults')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          { retry: { maxRetries: 3, jitter: 'none', baseDelay: 1 } },
+        );
+
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/ctor-defaults`,
+        );
+        expect(result).toEqual({ ok: true });
+      });
+
+      test('per-request override takes precedence over constructor', async () => {
+        nock(baseUrl)
+          .get('/per-request-override')
+          .reply(500, { message: 'fail' });
+
+        const constructorOnRetry = vi.fn();
+        const perRequestOnRetry = vi.fn();
+
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              maxRetries: 3,
+              onRetry: constructorOnRetry,
+              jitter: 'none',
+              baseDelay: 1,
+            },
+          },
+        );
+
+        await expect(
+          client.get(`${baseUrl}/per-request-override`, {
+            retry: { maxRetries: 0, onRetry: perRequestOnRetry },
+          }),
+        ).rejects.toThrow(HttpClientError);
+
+        expect(constructorOnRetry).not.toHaveBeenCalled();
+        expect(perRequestOnRetry).not.toHaveBeenCalled();
+      });
+
+      test('retry: false on constructor disables globally', async () => {
+        nock(baseUrl).get('/global-disabled').reply(500, { message: 'fail' });
+
+        const client = new HttpClient({}, { retry: false });
+
+        await expect(client.get(`${baseUrl}/global-disabled`)).rejects.toThrow(
+          HttpClientError,
+        );
+      });
+
+      test('retry: false on per-request disables for that call', async () => {
+        nock(baseUrl)
+          .get('/per-request-disabled')
+          .reply(500, { message: 'fail' });
+
+        const client = new HttpClient(
+          {},
+          { retry: { maxRetries: 3, baseDelay: 1 } },
+        );
+
+        await expect(
+          client.get(`${baseUrl}/per-request-disabled`, { retry: false }),
+        ).rejects.toThrow(HttpClientError);
+      });
+
+      test('default config when retry: {} provided', async () => {
+        nock(baseUrl)
+          .get('/default-config')
+          .reply(500, { message: 'fail' })
+          .get('/default-config')
+          .reply(200, { ok: true });
+
+        const delays: Array<number> = [];
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              onRetry: (_ctx, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          },
+        );
+
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/default-config`,
+        );
+        expect(result).toEqual({ ok: true });
+        // Default baseDelay=1000 with full jitter: delay is 0..1000
+        expect(delays[0]).toBeGreaterThanOrEqual(0);
+        expect(delays[0]).toBeLessThanOrEqual(1000);
+      });
+    });
+
+    describe('backoff', () => {
+      test('exponential delay increases with jitter: none', async () => {
+        nock(baseUrl)
+          .get('/backoff')
+          .times(4)
+          .reply(500, { message: 'fail' })
+          .get('/backoff')
+          .reply(200, { ok: true });
+
+        const delays: Array<number> = [];
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              maxRetries: 4,
+              baseDelay: 100,
+              jitter: 'none',
+              onRetry: (_ctx, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          },
+        );
+
+        await client.get(`${baseUrl}/backoff`);
+        // Exponential: 100, 200, 400, 800
+        expect(delays).toEqual([100, 200, 400, 800]);
+      });
+
+      test('delay capped at maxDelay', async () => {
+        nock(baseUrl)
+          .get('/max-delay')
+          .times(4)
+          .reply(500, { message: 'fail' })
+          .get('/max-delay')
+          .reply(200, { ok: true });
+
+        const delays: Array<number> = [];
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              maxRetries: 4,
+              baseDelay: 100,
+              maxDelay: 250,
+              jitter: 'none',
+              onRetry: (_ctx, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          },
+        );
+
+        await client.get(`${baseUrl}/max-delay`);
+        // 100, 200, 250 (capped), 250 (capped)
+        expect(delays).toEqual([100, 200, 250, 250]);
+      });
+
+      test('Retry-After header overrides calculated backoff when larger', async () => {
+        nock(baseUrl)
+          .get('/retry-after-override')
+          .reply(429, { message: 'slow down' }, { 'Retry-After': '2' })
+          .get('/retry-after-override')
+          .reply(200, { ok: true });
+
+        const delays: Array<number> = [];
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              jitter: 'none',
+              baseDelay: 1,
+              onRetry: (_ctx, _attempt, delay) => {
+                delays.push(delay);
+              },
+            },
+          },
+        );
+
+        await client.get(`${baseUrl}/retry-after-override`);
+        expect(delays).toHaveLength(1);
+        // baseDelay=1 with jitter=none → 1ms, Retry-After=2s → max(1, 2000) = 2000
+        expect(delays[0]).toBe(2000);
+      });
+    });
+
+    describe('callbacks', () => {
+      test('onRetry called with correct context, attempt, and delay', async () => {
+        nock(baseUrl)
+          .get('/on-retry')
+          .reply(503, { message: 'unavailable' })
+          .get('/on-retry')
+          .reply(200, { ok: true });
+
+        const calls: Array<{
+          context: { statusCode?: number; url: string };
+          attempt: number;
+          delay: number;
+        }> = [];
+
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              jitter: 'none',
+              baseDelay: 1,
+              onRetry: (context, attempt, delay) => {
+                calls.push({
+                  context: {
+                    statusCode: context.statusCode,
+                    url: context.url,
+                  },
+                  attempt,
+                  delay,
+                });
+              },
+            },
+          },
+        );
+
+        await client.get(`${baseUrl}/on-retry`);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].context.statusCode).toBe(503);
+        expect(calls[0].context.url).toBe(`${baseUrl}/on-retry`);
+        expect(calls[0].attempt).toBe(1);
+        expect(calls[0].delay).toBe(1);
+      });
+
+      test('retryCondition returning false stops retries', async () => {
+        nock(baseUrl).get('/condition-false').reply(500, { message: 'fail' });
+
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              baseDelay: 1,
+              retryCondition: () => false,
+            },
+          },
+        );
+
+        await expect(client.get(`${baseUrl}/condition-false`)).rejects.toThrow(
+          HttpClientError,
+        );
+      });
+
+      test('retryCondition can make normally non-retryable errors retryable', async () => {
+        nock(baseUrl)
+          .get('/condition-override')
+          .reply(404, { message: 'not found' })
+          .get('/condition-override')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              baseDelay: 1,
+              jitter: 'none',
+              retryCondition: (ctx) => ctx.statusCode === 404,
+            },
+          },
+        );
+
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/condition-override`,
+        );
+        expect(result).toEqual({ ok: true });
+      });
+    });
+
+    describe('integration', () => {
+      test('requestInterceptor runs on each retry attempt', async () => {
+        let interceptorCalls = 0;
+
+        nock(baseUrl)
+          .get('/interceptor-retry')
+          .matchHeader('Authorization', 'Bearer token-1')
+          .reply(500, { message: 'fail' })
+          .get('/interceptor-retry')
+          .matchHeader('Authorization', 'Bearer token-2')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          {
+            requestInterceptor: (_url, init) => {
+              interceptorCalls += 1;
+              const headers = new Headers(init.headers);
+              headers.set('Authorization', `Bearer token-${interceptorCalls}`);
+              return { ...init, headers };
+            },
+            retry: { jitter: 'none', baseDelay: 1 },
+          },
+        );
+
+        const result = await client.get<{ ok: boolean }>(
+          `${baseUrl}/interceptor-retry`,
+        );
+        expect(result).toEqual({ ok: true });
+        expect(interceptorCalls).toBe(2);
+      });
+
+      test('responseInterceptor runs on each retry attempt', async () => {
+        let interceptorCalls = 0;
+
+        nock(baseUrl)
+          .get('/resp-interceptor-retry')
+          .reply(500, { message: 'fail' })
+          .get('/resp-interceptor-retry')
+          .reply(200, { ok: true });
+
+        const client = new HttpClient(
+          {},
+          {
+            responseInterceptor: (response) => {
+              interceptorCalls += 1;
+              return response;
+            },
+            retry: { jitter: 'none', baseDelay: 1 },
+          },
+        );
+
+        await client.get(`${baseUrl}/resp-interceptor-retry`);
+        expect(interceptorCalls).toBe(2);
+      });
+
+      test('stale-if-error fallback after all retries exhausted', async () => {
+        const now = Date.now();
+        vi.spyOn(Date, 'now').mockReturnValue(now);
+
+        function makeCacheStore() {
+          const store = new Map<string, { value: unknown; ttl: number }>();
+          return {
+            async get(hash: string) {
+              return store.get(hash)?.value;
+            },
+            async set(hash: string, value: unknown, ttl: number) {
+              store.set(hash, { value, ttl });
+            },
+            async delete(hash: string) {
+              store.delete(hash);
+            },
+            async clear() {
+              store.clear();
+            },
+          };
+        }
+
+        const cache = makeCacheStore();
+        const client = new HttpClient(
+          { cache },
+          { retry: { maxRetries: 2, jitter: 'none', baseDelay: 1 } },
+        );
+
+        nock(baseUrl)
+          .get('/sie-retry')
+          .reply(
+            200,
+            { v: 1 },
+            { 'Cache-Control': 'max-age=1, stale-if-error=300' },
+          );
+
+        await client.get(`${baseUrl}/sie-retry`);
+
+        vi.spyOn(Date, 'now').mockReturnValue(now + 5000);
+
+        // All retries also return 500
+        nock(baseUrl)
+          .get('/sie-retry')
+          .times(3)
+          .reply(500, { message: 'Server error' });
+
+        const result = await client.get(`${baseUrl}/sie-retry`);
+        expect(result).toEqual({ v: 1 });
+      });
+
+      test('errorHandler receives final error after retries exhausted', async () => {
+        nock(baseUrl)
+          .get('/error-handler-retry')
+          .times(3)
+          .reply(500, { message: 'Server error' });
+
+        class CustomError extends Error {
+          statusCode: number;
+          constructor(message: string, statusCode: number) {
+            super(message);
+            this.name = 'CustomError';
+            this.statusCode = statusCode;
+          }
+        }
+
+        let errorHandlerCalls = 0;
+        const client = new HttpClient(
+          {},
+          {
+            retry: { maxRetries: 2, jitter: 'none', baseDelay: 1 },
+            errorHandler: (ctx) => {
+              errorHandlerCalls += 1;
+              return new CustomError(ctx.message, ctx.response.status);
+            },
+          },
+        );
+
+        await expect(
+          client.get(`${baseUrl}/error-handler-retry`),
+        ).rejects.toThrow(CustomError);
+        expect(errorHandlerCalls).toBe(1);
+      });
+
+      test('AbortSignal cancels retry wait', async () => {
+        nock(baseUrl).get('/abort-retry-wait').reply(500, { message: 'fail' });
+
+        const controller = new AbortController();
+
+        const client = new HttpClient(
+          {},
+          {
+            retry: {
+              maxRetries: 3,
+              baseDelay: 10_000,
+              jitter: 'none',
+              onRetry: () => {
+                // Abort during the retry delay
+                controller.abort();
+              },
+            },
+          },
+        );
+
+        await expect(
+          client.get(`${baseUrl}/abort-retry-wait`, {
+            signal: controller.signal,
+          }),
+        ).rejects.toMatchObject({ name: 'AbortError' });
+      });
+    });
+
+    describe('no retry by default', () => {
+      test('does not retry when no retry config provided', async () => {
+        nock(baseUrl).get('/no-retry-default').reply(500, { message: 'fail' });
+
+        const client = new HttpClient();
+
+        await expect(client.get(`${baseUrl}/no-retry-default`)).rejects.toThrow(
+          HttpClientError,
+        );
+      });
+    });
+
+    describe('edge cases', () => {
+      test('isRetryableRequest returns false for non-TypeError non-HTTP errors', () => {
+        const client = new HttpClient(
+          {},
+          { retry: { baseDelay: 1 } },
+        ) as unknown as {
+          resolveRetryConfig: (perRequest?: object | false) => {
+            baseDelay: number;
+            maxDelay: number;
+            jitter: string;
+            maxRetries: number;
+          } | null;
+          isRetryableRequest: (
+            error: Error,
+            retryConfig: {
+              baseDelay: number;
+              maxDelay: number;
+              jitter: string;
+              maxRetries: number;
+            },
+            attempt: number,
+            url: string,
+          ) => { shouldRetry: boolean; context: unknown };
+        };
+
+        const retryConfig = client.resolveRetryConfig({})!;
+        const result = client.isRetryableRequest(
+          new Error('generic error'),
+          retryConfig,
+          1,
+          `${baseUrl}/test`,
+        );
+        expect(result.shouldRetry).toBe(false);
+      });
+
+      test('throws last error when all retries exhausted on network failure', async () => {
+        const client = new HttpClient(
+          {},
+          {
+            fetchFn: async () => {
+              throw new TypeError('fetch failed');
+            },
+            retry: { maxRetries: 2, jitter: 'none', baseDelay: 1 },
+          },
+        );
+
+        await expect(
+          client.get(`${baseUrl}/exhausted-network`),
+        ).rejects.toThrow(HttpClientError);
+      });
     });
   });
 });

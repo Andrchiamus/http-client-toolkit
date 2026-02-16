@@ -19,7 +19,12 @@ import {
   RequestPriority,
   hashRequest,
 } from '../stores/index.js';
-import { HttpClientContract } from '../types/index.js';
+import {
+  HttpClientContract,
+  type HttpErrorContext,
+  type RetryContext,
+  type RetryOptions,
+} from '../types/index.js';
 
 const DEFAULT_RATE_LIMIT_HEADER_NAMES = {
   retryAfter: ['retry-after'],
@@ -145,6 +150,11 @@ export interface HttpClientOptions {
     combined?: Array<string>;
   };
   /**
+   * Automatic retry configuration. Pass `false` to disable retries globally.
+   * Pass an options object to enable retries with custom settings.
+   */
+  retry?: RetryOptions | false;
+  /**
    * Override specific cache header behaviors.
    */
   cacheOverrides?: {
@@ -171,24 +181,7 @@ interface ParsedResponseBody {
   data: unknown;
 }
 
-export interface HttpErrorContext {
-  /** Human-readable description, e.g. `"Request failed with status 404"`. */
-  message: string;
-  /** The URL that was requested. */
-  url: string;
-  response: {
-    /** HTTP status code (e.g. 404, 500). */
-    status: number;
-    /**
-     * Parsed response body. `undefined` for empty bodies and 204/205 responses.
-     * JSON responses are parsed into objects/arrays; non-JSON bodies are returned
-     * as raw strings.
-     */
-    data: unknown;
-    /** Response headers. */
-    headers: Headers;
-  };
-}
+export { type HttpErrorContext, type RetryContext, type RetryOptions };
 
 export class HttpClient implements HttpClientContract {
   private stores: HttpClientStores;
@@ -209,6 +202,7 @@ export class HttpClient implements HttpClientContract {
       | 'errorHandler'
       | 'responseHandler'
       | 'cacheOverrides'
+      | 'retry'
     > & {
       rateLimitHeaders: RateLimitHeaderConfig;
     };
@@ -225,6 +219,7 @@ export class HttpClient implements HttpClientContract {
       responseTransformer: options.responseTransformer,
       errorHandler: options.errorHandler,
       responseHandler: options.responseHandler,
+      retry: options.retry,
       cacheOverrides: options.cacheOverrides,
       rateLimitHeaders: this.normalizeRateLimitHeaders(
         options.rateLimitHeaders,
@@ -489,6 +484,7 @@ export class HttpClient implements HttpClientContract {
   private async enforceServerCooldown(
     url: string,
     signal?: AbortSignal,
+    forceWait = false,
   ): Promise<void> {
     const scope = this.getOriginScope(url);
     const startedAt = Date.now();
@@ -508,7 +504,7 @@ export class HttpClient implements HttpClientContract {
         return;
       }
 
-      if (this.options.throwOnRateLimit) {
+      if (this.options.throwOnRateLimit && !forceWait) {
         throw new Error(
           `Rate limit exceeded for origin '${scope}'. Wait ${waitMs}ms before retrying.`,
         );
@@ -722,6 +718,104 @@ export class HttpClient implements HttpClientContract {
     });
   }
 
+  private static RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+
+  private resolveRetryConfig(
+    perRequest?: RetryOptions | false,
+  ):
+    | (Required<
+        Pick<RetryOptions, 'baseDelay' | 'jitter' | 'maxDelay' | 'maxRetries'>
+      > &
+        Pick<RetryOptions, 'onRetry' | 'retryCondition'>)
+    | null {
+    // Per-request `false` disables retries for this call
+    if (perRequest === false) return null;
+    // Constructor `false` disables retries globally
+    if (this.options.retry === false) return null;
+
+    const base = (
+      typeof this.options.retry === 'object' ? this.options.retry : {}
+    ) as RetryOptions;
+    const override = (
+      typeof perRequest === 'object' ? perRequest : {}
+    ) as RetryOptions;
+
+    // No retry config provided at all → retries disabled
+    if (this.options.retry === undefined && perRequest === undefined)
+      return null;
+
+    return {
+      baseDelay: override.baseDelay ?? base.baseDelay ?? 1000,
+      jitter: override.jitter ?? base.jitter ?? 'full',
+      maxDelay: override.maxDelay ?? base.maxDelay ?? 30000,
+      maxRetries: override.maxRetries ?? base.maxRetries ?? 3,
+      onRetry: override.onRetry ?? base.onRetry,
+      retryCondition: override.retryCondition ?? base.retryCondition,
+    };
+  }
+
+  private calculateRetryDelay(
+    attempt: number,
+    baseDelay: number,
+    maxDelay: number,
+    jitter: 'full' | 'none',
+    retryAfterMs?: number,
+  ): number {
+    const exponentialDelay = baseDelay * Math.pow(2, attempt - 1);
+    const cappedDelay = Math.min(exponentialDelay, maxDelay);
+    const jitteredDelay =
+      jitter === 'full' ? Math.floor(Math.random() * cappedDelay) : cappedDelay;
+    // Retry-After from server takes precedence when larger
+    if (retryAfterMs !== undefined && retryAfterMs > jitteredDelay) {
+      return retryAfterMs;
+    }
+    return jitteredDelay;
+  }
+
+  private isRetryableRequest(
+    error: Error | HttpErrorContext,
+    retryConfig: NonNullable<ReturnType<HttpClient['resolveRetryConfig']>>,
+    attempt: number,
+    url: string,
+  ): { shouldRetry: boolean; context: RetryContext } {
+    let statusCode: number | undefined;
+    let retryAfterMs: number | undefined;
+
+    if (this.isHttpErrorContext(error)) {
+      statusCode = error.response.status;
+      const retryAfterRaw = this.getHeaderValue(
+        error.response.headers,
+        this.options.rateLimitHeaders.retryAfter,
+      );
+      retryAfterMs = this.parseRetryAfterMs(retryAfterRaw);
+    }
+
+    const context: RetryContext = { error, retryAfterMs, statusCode, url };
+
+    // Custom condition overrides default logic
+    if (retryConfig.retryCondition) {
+      return {
+        shouldRetry: retryConfig.retryCondition(context, attempt),
+        context,
+      };
+    }
+
+    // Default: retry on retryable status codes
+    if (statusCode !== undefined) {
+      return {
+        shouldRetry: HttpClient.RETRYABLE_STATUS_CODES.has(statusCode),
+        context,
+      };
+    }
+
+    // Network errors (TypeError) are retryable
+    if (error instanceof TypeError) {
+      return { shouldRetry: true, context };
+    }
+
+    return { shouldRetry: false, context };
+  }
+
   private async parseResponseBody(
     response: Response,
   ): Promise<ParsedResponseBody> {
@@ -758,12 +852,145 @@ export class HttpClient implements HttpClientContract {
     }
   }
 
+  private async executeFetch(
+    url: string,
+    fetchHeaders: Headers,
+    signal: AbortSignal | undefined,
+    retryConfig: NonNullable<ReturnType<HttpClient['resolveRetryConfig']>> | null,
+    staleEntry: CacheEntry<unknown> | undefined,
+  ): Promise<
+    | { notModified: true; refreshedEntry: CacheEntry<unknown> }
+    | { notModified: false; response: Response; parsedBody: ParsedResponseBody }
+  > {
+    const maxAttempts = retryConfig ? retryConfig.maxRetries + 1 : 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Re-check server cooldown between retries — the previous attempt may
+      // have set a cooldown via applyServerRateLimitHints. Always wait (never
+      // throw) since the retry mechanism is handling recovery.
+      if (attempt > 1) {
+        await this.enforceServerCooldown(url, signal, true);
+      }
+
+      try {
+        let fetchInit: RequestInit = { signal };
+        if ([...fetchHeaders].length > 0) {
+          fetchInit.headers = new Headers(fetchHeaders);
+        }
+
+        // Re-run interceptor each attempt (auth tokens may refresh)
+        if (this.options.requestInterceptor) {
+          fetchInit = await this.options.requestInterceptor(url, fetchInit);
+        }
+
+        const fetchFn = this.options.fetchFn ?? globalThis.fetch;
+        let response = await fetchFn(url, fetchInit);
+
+        if (this.options.responseInterceptor) {
+          response = await this.options.responseInterceptor(response, url);
+        }
+        this.applyServerRateLimitHints(
+          url,
+          response.headers,
+          response.status,
+        );
+
+        // Handle 304 Not Modified — must be checked BEFORE !response.ok
+        if (response.status === 304 && staleEntry) {
+          return {
+            notModified: true,
+            refreshedEntry: refreshCacheEntry(staleEntry, response.headers),
+          };
+        }
+
+        const parsedBody = await this.parseResponseBody(response);
+
+        if (!response.ok) {
+          const httpError: HttpErrorContext = {
+            message: `Request failed with status ${response.status}`,
+            url,
+            response: {
+              status: response.status,
+              data: parsedBody.data,
+              headers: response.headers,
+            },
+          };
+
+          // Check if we should retry this error
+          if (retryConfig && attempt < maxAttempts) {
+            const { shouldRetry, context } = this.isRetryableRequest(
+              httpError,
+              retryConfig,
+              attempt,
+              url,
+            );
+            if (shouldRetry) {
+              const delay = this.calculateRetryDelay(
+                attempt,
+                retryConfig.baseDelay,
+                retryConfig.maxDelay,
+                retryConfig.jitter,
+                context.retryAfterMs,
+              );
+              retryConfig.onRetry?.(context, attempt, delay);
+              await wait(delay, signal);
+              continue;
+            }
+          }
+
+          throw httpError;
+        }
+
+        return { notModified: false, response, parsedBody };
+      } catch (fetchError) {
+        // AbortError always propagates immediately — no retry
+        if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+          throw fetchError;
+        }
+
+        // Network errors (TypeError) — may be retryable
+        if (
+          fetchError instanceof TypeError &&
+          retryConfig &&
+          attempt < maxAttempts
+        ) {
+          const { shouldRetry, context } = this.isRetryableRequest(
+            fetchError,
+            retryConfig,
+            attempt,
+            url,
+          );
+          if (shouldRetry) {
+            const delay = this.calculateRetryDelay(
+              attempt,
+              retryConfig.baseDelay,
+              retryConfig.maxDelay,
+              retryConfig.jitter,
+              context.retryAfterMs,
+            );
+            retryConfig.onRetry?.(context, attempt, delay);
+            await wait(delay, signal);
+            continue;
+          }
+        }
+
+        // HttpErrorContext thrown from the !response.ok branch above
+        // or other non-retryable errors — propagate
+        throw fetchError;
+      }
+    }
+
+    // TypeScript: unreachable — the loop always returns or throws
+    throw new Error('Unexpected end of retry loop');
+  }
+
   async get<Result>(
     url: string,
     options: {
       signal?: AbortSignal;
       priority?: RequestPriority;
       headers?: Record<string, string>;
+      retry?: RetryOptions | false;
     } = {},
   ): Promise<Result> {
     const { signal, priority = 'background', headers } = options;
@@ -875,9 +1102,8 @@ export class HttpClient implements HttpClientContract {
         );
       }
 
-      // 4. Execute the actual HTTP request
-      // Start from user-provided headers, then layer conditional headers on top
-      let fetchInit: RequestInit = { signal };
+      // 4. Execute the actual HTTP request (with optional retry)
+      // Build base headers once — conditional headers on top of user headers
       const fetchHeaders = new Headers(headers);
       if (staleEntry) {
         if (staleEntry.metadata.etag) {
@@ -890,34 +1116,31 @@ export class HttpClient implements HttpClientContract {
           );
         }
       }
-      if ([...fetchHeaders].length > 0) {
-        fetchInit.headers = fetchHeaders;
-      }
 
-      if (this.options.requestInterceptor) {
-        fetchInit = await this.options.requestInterceptor(url, fetchInit);
-      }
+      const retryConfig = this.resolveRetryConfig(options.retry);
+      const fetchResult = await this.executeFetch(
+        url,
+        fetchHeaders,
+        signal,
+        retryConfig,
+        staleEntry,
+      );
 
-      const fetchFn = this.options.fetchFn ?? globalThis.fetch;
-      let response = await fetchFn(url, fetchInit);
-
-      if (this.options.responseInterceptor) {
-        response = await this.options.responseInterceptor(response, url);
-      }
-      this.applyServerRateLimitHints(url, response.headers, response.status);
-
-      // Handle 304 Not Modified — must be checked BEFORE !response.ok
-      if (response.status === 304 && staleEntry) {
-        const refreshed = refreshCacheEntry(staleEntry, response.headers);
+      // Handle 304 Not Modified
+      if (fetchResult.notModified) {
+        const { refreshedEntry } = fetchResult;
         const ttl = this.clampTTL(
-          calculateStoreTTL(refreshed.metadata, this.options.defaultCacheTTL),
+          calculateStoreTTL(
+            refreshedEntry.metadata,
+            this.options.defaultCacheTTL,
+          ),
         );
 
         if (this.stores.cache) {
-          await this.stores.cache.set(hash, refreshed, ttl);
+          await this.stores.cache.set(hash, refreshedEntry, ttl);
         }
 
-        const result = refreshed.value as Result;
+        const result = refreshedEntry.value as Result;
 
         if (this.stores.dedupe) {
           await this.stores.dedupe.complete(hash, result);
@@ -926,20 +1149,7 @@ export class HttpClient implements HttpClientContract {
         return result;
       }
 
-      const parsedBody = await this.parseResponseBody(response);
-
-      if (!response.ok) {
-        const error: HttpErrorContext = {
-          message: `Request failed with status ${response.status}`,
-          url,
-          response: {
-            status: response.status,
-            data: parsedBody.data,
-            headers: response.headers,
-          },
-        };
-        throw error;
-      }
+      const { response, parsedBody } = fetchResult;
 
       // 5. Apply response transformer if provided
       let data: unknown = parsedBody.data;

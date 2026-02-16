@@ -42,6 +42,7 @@ All stores are optional. Pass only the ones you need.
 | `responseHandler` | `(data: unknown) => unknown` | — | Post-transformation hook for validation or domain-level error detection. Throw to reject 2xx responses with application-level errors |
 | `errorHandler` | `(context: HttpErrorContext) => Error` | — | Convert HTTP errors to domain-specific types. Context includes `url`, response `status`, parsed `data`, and `headers`. Not called for network failures |
 | `rateLimitHeaders` | `RateLimitHeaderConfig` | defaults | Configure standard/custom header names |
+| `retry` | `RetryOptions \| false` | — | Automatic retry configuration. See [Retries guide](/http-client-toolkit/guides/retries/) |
 | `cacheOverrides` | `object` | — | Override specific cache header behaviors (see below) |
 
 ## Methods
@@ -65,6 +66,7 @@ The `url` must be an absolute URL (e.g. `https://api.example.com/items`).
 | `signal` | `AbortSignal` | — | Cancels wait + request when aborted |
 | `priority` | `'user' \| 'background'` | `'background'` | Used by adaptive rate-limit stores |
 | `headers` | `Record<string, string>` | — | Custom headers sent with the request; also used for Vary-based cache matching |
+| `retry` | `RetryOptions \| false` | — | Per-request retry override. Pass `false` to disable retries for this request |
 
 ## Request Flow
 
@@ -76,8 +78,9 @@ When `client.get(url)` is called, the request passes through each configured lay
 4. **Request Interceptor** — Modify the outgoing request (e.g. inject auth headers)
 5. **Fetch** — Execute the HTTP request via `fetchFn` (or `globalThis.fetch`)
 6. **Response Interceptor** — Inspect or modify the raw `Response`
-7. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
-8. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
+7. **Retry** — On transient failure, repeat steps 4–6 with exponential backoff (if configured)
+8. **Transform & Validate** — Apply `responseTransformer` then `responseHandler`
+9. **Store** — Cache the result, record the rate limit hit, and resolve any deduplicated waiters
 
 See the [Interceptors guide](/http-client-toolkit/guides/interceptors/) for detailed usage.
 
