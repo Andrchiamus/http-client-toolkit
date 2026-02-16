@@ -3255,4 +3255,233 @@ describe('HttpClient', () => {
       });
     });
   });
+
+  describe('per-request cache TTL overrides', () => {
+    function makeCacheStore() {
+      const store = new Map<string, { value: unknown; ttl: number }>();
+      return {
+        async get(hash: string) {
+          const entry = store.get(hash);
+          return entry?.value;
+        },
+        async set(hash: string, value: unknown, ttl: number) {
+          store.set(hash, { value, ttl });
+        },
+        async delete(hash: string) {
+          store.delete(hash);
+        },
+        async clear() {
+          store.clear();
+        },
+        _store: store,
+      };
+    }
+
+    test('cacheTTL overrides defaultCacheTTL for this request', async () => {
+      const cache = makeCacheStore();
+      const client = new HttpClient({ cache }, { defaultCacheTTL: 900 });
+
+      nock(baseUrl).get('/per-req-ttl').reply(200, { id: 1 });
+
+      await client.get(`${baseUrl}/per-req-ttl`, { cacheTTL: 120 });
+
+      const hash = hashRequest(`${baseUrl}/per-req-ttl`, {});
+      expect(cache._store.get(hash)?.ttl).toBe(120);
+    });
+
+    test('per-request minimumTTL overrides constructor minimumTTL', async () => {
+      const cache = makeCacheStore();
+      const client = new HttpClient(
+        { cache },
+        { cacheOverrides: { minimumTTL: 300 } },
+      );
+
+      nock(baseUrl)
+        .get('/pr-min-ttl')
+        .reply(200, { id: 1 }, { 'Cache-Control': 'max-age=10' });
+
+      await client.get(`${baseUrl}/pr-min-ttl`, {
+        cacheOverrides: { minimumTTL: 50 },
+      });
+
+      const hash = hashRequest(`${baseUrl}/pr-min-ttl`, {});
+      // Per-request minimumTTL=50 overrides constructor minimumTTL=300
+      // max-age=10 clamped to 50
+      expect(cache._store.get(hash)?.ttl).toBe(50);
+    });
+
+    test('per-request maximumTTL overrides constructor maximumTTL', async () => {
+      const cache = makeCacheStore();
+      const client = new HttpClient(
+        { cache },
+        { cacheOverrides: { maximumTTL: 60 } },
+      );
+
+      nock(baseUrl)
+        .get('/pr-max-ttl')
+        .reply(200, { id: 1 }, { 'Cache-Control': 'max-age=3600' });
+
+      await client.get(`${baseUrl}/pr-max-ttl`, {
+        cacheOverrides: { maximumTTL: 500 },
+      });
+
+      const hash = hashRequest(`${baseUrl}/pr-max-ttl`, {});
+      // Per-request maximumTTL=500 overrides constructor maximumTTL=60
+      // max-age=3600 clamped to 500
+      expect(cache._store.get(hash)?.ttl).toBe(500);
+    });
+
+    test('per-request ignoreNoStore forces caching despite no-store', async () => {
+      const cache = makeCacheStore();
+      // Constructor does NOT set ignoreNoStore
+      const client = new HttpClient({ cache });
+
+      nock(baseUrl)
+        .get('/pr-no-store')
+        .reply(200, { id: 1 }, { 'Cache-Control': 'no-store, max-age=60' });
+
+      await client.get(`${baseUrl}/pr-no-store`, {
+        cacheOverrides: { ignoreNoStore: true },
+      });
+
+      const hash = hashRequest(`${baseUrl}/pr-no-store`, {});
+      expect(isCacheEntry(await cache.get(hash))).toBe(true);
+    });
+
+    test('per-request ignoreNoCache skips revalidation', async () => {
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+
+      const cache = makeCacheStore();
+      // Constructor does NOT set ignoreNoCache
+      const client = new HttpClient({ cache });
+
+      nock(baseUrl)
+        .get('/pr-no-cache')
+        .reply(200, { v: 1 }, { 'Cache-Control': 'no-cache, max-age=3600' });
+
+      await client.get(`${baseUrl}/pr-no-cache`, {
+        cacheOverrides: { ignoreNoCache: true },
+      });
+
+      // No second nock — should return cached value without fetching
+      const result = await client.get(`${baseUrl}/pr-no-cache`, {
+        cacheOverrides: { ignoreNoCache: true },
+      });
+      expect(result).toEqual({ v: 1 });
+    });
+
+    test('shallow merge — unspecified per-request fields fall back to constructor', async () => {
+      const cache = makeCacheStore();
+      const client = new HttpClient(
+        { cache },
+        {
+          cacheOverrides: { minimumTTL: 100, maximumTTL: 500 },
+        },
+      );
+
+      nock(baseUrl)
+        .get('/pr-merge')
+        .reply(200, { id: 1 }, { 'Cache-Control': 'max-age=10' });
+
+      // Only override maximumTTL; minimumTTL should fall back to constructor (100)
+      await client.get(`${baseUrl}/pr-merge`, {
+        cacheOverrides: { maximumTTL: 200 },
+      });
+
+      const hash = hashRequest(`${baseUrl}/pr-merge`, {});
+      // max-age=10 → clamped to minimumTTL=100 (from constructor), then capped at maximumTTL=200 (from per-request)
+      expect(cache._store.get(hash)?.ttl).toBe(100);
+    });
+
+    test('per-request cacheTTL applies on 304 refresh path', async () => {
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+
+      const cache = makeCacheStore();
+      const client = new HttpClient({ cache }, { defaultCacheTTL: 900 });
+
+      nock(baseUrl)
+        .get('/pr-304')
+        .reply(200, { id: 1 }, { 'Cache-Control': 'max-age=1', ETag: '"v1"' });
+
+      await client.get(`${baseUrl}/pr-304`, { cacheTTL: 200 });
+
+      // Advance past freshness
+      vi.spyOn(Date, 'now').mockReturnValue(now + 5000);
+
+      // 304 with no cache headers — refreshed entry inherits original max-age=1
+      // but calculateStoreTTL sees maxAge=1 → returns 1.
+      // Without per-request cacheTTL the clamp would use constructor defaults.
+      // With per-request minimumTTL we can observe the override.
+      nock(baseUrl)
+        .get('/pr-304')
+        .matchHeader('If-None-Match', '"v1"')
+        .reply(304, '');
+
+      await client.get(`${baseUrl}/pr-304`, {
+        cacheTTL: 200,
+        cacheOverrides: { minimumTTL: 150 },
+      });
+
+      const hash = hashRequest(`${baseUrl}/pr-304`, {});
+      // Original max-age=1 → clamped to per-request minimumTTL=150
+      expect(cache._store.get(hash)?.ttl).toBe(150);
+    });
+
+    test('per-request cacheTTL applies in backgroundRevalidate (SWR path)', async () => {
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+
+      const cache = makeCacheStore();
+      const client = new HttpClient({ cache }, { defaultCacheTTL: 900 });
+
+      // Initial response with SWR
+      nock(baseUrl)
+        .get('/pr-swr')
+        .reply(
+          200,
+          { v: 1 },
+          { 'Cache-Control': 'max-age=1, stale-while-revalidate=60' },
+        );
+
+      await client.get(`${baseUrl}/pr-swr`, { cacheTTL: 200 });
+
+      // Advance into SWR window
+      vi.spyOn(Date, 'now').mockReturnValue(now + 2000);
+
+      // Background revalidation will get fresh response
+      nock(baseUrl).get('/pr-swr').reply(200, { v: 2 });
+
+      // This returns stale value but triggers background revalidation
+      const result = await client.get(`${baseUrl}/pr-swr`, { cacheTTL: 200 });
+      expect(result).toEqual({ v: 1 });
+
+      await client.flushRevalidations();
+
+      const hash = hashRequest(`${baseUrl}/pr-swr`, {});
+      const entry = cache._store.get(hash);
+      // Background revalidation should use per-request cacheTTL (200)
+      expect(entry?.ttl).toBe(200);
+    });
+
+    test('no per-request options uses constructor behavior (regression)', async () => {
+      const cache = makeCacheStore();
+      const client = new HttpClient(
+        { cache },
+        { defaultCacheTTL: 900, cacheOverrides: { minimumTTL: 300 } },
+      );
+
+      nock(baseUrl)
+        .get('/no-override')
+        .reply(200, { id: 1 }, { 'Cache-Control': 'max-age=10' });
+
+      // No per-request options
+      await client.get(`${baseUrl}/no-override`);
+
+      const hash = hashRequest(`${baseUrl}/no-override`, {});
+      // max-age=10 clamped to minimumTTL=300 from constructor
+      expect(cache._store.get(hash)?.ttl).toBe(300);
+    });
+  });
 });

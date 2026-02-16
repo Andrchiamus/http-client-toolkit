@@ -41,6 +41,17 @@ export interface RetryOptions {
   retryCondition?: (context: RetryContext, attempt: number) => boolean;
 }
 
+export interface CacheOverrideOptions {
+  /** Cache responses even when Cache-Control: no-store is set */
+  ignoreNoStore?: boolean;
+  /** Skip revalidation even when Cache-Control: no-cache is set */
+  ignoreNoCache?: boolean;
+  /** Minimum TTL in seconds — floor on header-derived freshness */
+  minimumTTL?: number;
+  /** Maximum TTL in seconds — cap on header-derived freshness */
+  maximumTTL?: number;
+}
+
 export interface HttpClientContract {
   /**
    * Perform a GET request.
@@ -73,6 +84,16 @@ export interface HttpClientContract {
        * this specific request even if retries are enabled at the constructor level.
        */
       retry?: RetryOptions | false;
+      /**
+       * Per-request default cache TTL in seconds. Overrides the constructor-level
+       * `defaultCacheTTL` for this specific request.
+       */
+      cacheTTL?: number;
+      /**
+       * Per-request cache override options. Shallow-merged with constructor-level
+       * `cacheOverrides` — specified fields override, unspecified fields fall back.
+       */
+      cacheOverrides?: CacheOverrideOptions;
     },
   ): Promise<Result>;
 }
